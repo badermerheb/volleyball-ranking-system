@@ -13,7 +13,7 @@ import { ShieldCheck, LogOut, Trophy, RefreshCcw, BarChart3 } from "lucide-react
 
 /* -------------------- Config -------------------- */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
-const LS_USER_KEY = "vb_current_user"; // <— persist login
+const LS_USER_KEY = "vb_current_user";
 
 /* -------------------- Domain Data -------------------- */
 const PLAYERS = [
@@ -123,19 +123,28 @@ function Dots({ total, index }: { total: number; index: number }) {
 export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
 
+  // loading state for "did this user already submit?"
+  const [myLoading, setMyLoading] = useState(false); // <— NEW
+
   // server-backed state
   const [myRatings, setMyRatings] = useState<RatingEntry[]>([]);
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
   const [leaderboardReady, setLeaderboardReady] = useState(false);
-  const [ratersCount, setRatersCount] = useState(0);   // <— NEW
+  const [ratersCount, setRatersCount] = useState(0);
   const [totalPlayers, setTotalPlayers] = useState<number>(PLAYERS.length);
 
+  // rating session state (client-only until submit)
+  const [pendingOrder, setPendingOrder] = useState<string[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentScore, setCurrentScore] = useState(7);
+  const [sessionRatings, setSessionRatings] = useState<{ ratee: string; score: number }[]>([]);
 
   // Persisted login: restore on mount
   useEffect(() => {
     const cached = localStorage.getItem(LS_USER_KEY);
-    if (cached && PLAYERS.includes(cached as any)) {
+    if (cached && (PLAYERS as readonly string[]).includes(cached)) {
       setCurrentUser(cached);
+      setMyLoading(true); // we will check /mine below
     }
     // Always fetch current leaderboard status
     fetchLeaderboard()
@@ -151,6 +160,7 @@ export default function App() {
   // When user logs in (or after refresh with cached user), pull his set + leaderboard
   useEffect(() => {
     if (!currentUser) return;
+    setMyLoading(true); // <— start checking
     (async () => {
       try {
         const [mine, lb] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
@@ -161,6 +171,8 @@ export default function App() {
         setTotalPlayers(lb.total);
       } catch (e) {
         toast.error("Failed to load data from server.");
+      } finally {
+        setMyLoading(false); // <— done checking
       }
     })();
   }, [currentUser]);
@@ -169,7 +181,8 @@ export default function App() {
 
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
-    if (!currentUser || hasSubmitted) return;
+    // hard block if we're still checking or already submitted
+    if (!currentUser || myLoading || hasSubmitted) return; // <— guard
     const order = PLAYERS.filter((p) => p !== currentUser);
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
@@ -182,11 +195,6 @@ export default function App() {
     setCurrentScore(7);
     setSessionRatings([]);
   }
-
-  const [pendingOrder, setPendingOrder] = useState<string[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [currentScore, setCurrentScore] = useState(7);
-  const [sessionRatings, setSessionRatings] = useState<{ ratee: string; score: number }[]>([]);
 
   async function submitOne() {
     if (!currentUser) return;
@@ -219,11 +227,12 @@ export default function App() {
 
   function handleLogout() {
     setCurrentUser(null);
-    localStorage.removeItem(LS_USER_KEY); // <— clear persisted login
+    localStorage.removeItem(LS_USER_KEY);
     setPendingOrder([]);
     setCurrentIndex(0);
     setSessionRatings([]);
     setMyRatings([]);
+    setMyLoading(false);
   }
 
   async function handleReset() {
@@ -255,7 +264,7 @@ export default function App() {
         />
         {!currentUser ? (
           <LoginCard onLogin={(name) => {
-            localStorage.setItem(LS_USER_KEY, name); // <— persist on login
+            localStorage.setItem(LS_USER_KEY, name);
             setCurrentUser(name);
           }} />
         ) : (
@@ -277,6 +286,7 @@ export default function App() {
                 onStart={startRatingFlow}
                 hasFinished={sessionRatings.length === PLAYERS.length - 1}
                 hasSubmitted={hasSubmitted}
+                checking={myLoading} // <— NEW
               />
             </TabsContent>
 
@@ -369,14 +379,14 @@ function LoginCard({ onLogin }: { onLogin: (name: string) => void }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    const normalized = PLAYERS.find(
+    const normalized = (PLAYERS as readonly string[]).find(
       (p) => p.toLowerCase() === name.trim().toLowerCase()
     );
     if (!normalized) {
       toast.error("Unknown player. Use one of the 8 names.");
       return;
     }
-    if (PASSWORDS[normalized] !== pass) {
+    if (PASSWORDS[normalized as keyof typeof PASSWORDS] !== pass) {
       toast.error("Wrong password.");
       return;
     }
@@ -434,6 +444,7 @@ function RateFlow({
   currentScore,
   hasFinished,
   hasSubmitted,
+  checking, // <— NEW
   onScoreChange,
   onSubmitOne,
   onStart,
@@ -444,6 +455,7 @@ function RateFlow({
   currentScore: number;
   hasFinished: boolean;
   hasSubmitted: boolean;
+  checking: boolean; // <— NEW
   onScoreChange: (v: number) => void;
   onSubmitOne: () => void;
   onStart: () => void;
@@ -467,7 +479,7 @@ function RateFlow({
             {hasSubmitted ? (
               <>
                 <p className="text-center text-sm text-muted-foreground max-w-prose">
-                  You’ve already submitted your ratings for this round. Wait for the leaderboard to unlock (once everyone submits), or ask the admin to reset for a new round.
+                  You’ve already submitted your ratings for this round. Wait for the leaderboard to unlock once everyone submits, or ask the admin to reset for a new round.
                 </p>
                 <Button size="lg" disabled>
                   Start Rating
@@ -478,8 +490,8 @@ function RateFlow({
                 <p className="text-center text-sm text-muted-foreground max-w-prose">
                   You'll be shown each teammate (except yourself) one by one. Slide to rate from 1 (lowest) to 10 (highest). You can only submit once per round.
                 </p>
-                <Button size="lg" onClick={onStart}>
-                  Start Rating
+                <Button size="lg" onClick={onStart} disabled={checking}>
+                  {checking ? "Checking your status..." : "Start Rating"}
                 </Button>
               </>
             )}
