@@ -18,9 +18,9 @@ const PLAYERS = [
   "Edwin", "Justin", "Marc", "Rayan"
 ];
 const PASSWORDS = {
-  Bader:"bader123", Charbel:"charbel123", Christian:"christian123",
-  Edmond:"edmond123", Edwin:"edwin123", Justin:"justin123",
-  Marc:"marc123", Rayan:"rayan123"
+  Bader:"Ghoul23", Charbel:"0.2kd", Christian:"b4ss0",
+  Edmond:"123eddy123", Edwin:"guzwin1", Justin:"jbcbobj",
+  Marc:"mezapromax", Rayan:"nurumassage"
 };
 
 /* ---------- db ---------- */
