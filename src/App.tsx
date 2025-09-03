@@ -12,7 +12,8 @@ import { Badge } from "./components/ui/badge";
 import { ShieldCheck, LogOut, Trophy, UserRound, RefreshCcw, BarChart3 } from "lucide-react";
 
 /* -------------------- Config -------------------- */
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787"; // change if you deploy elsewhere
+// src/App.tsx
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
 
 /* -------------------- Domain Data -------------------- */
 const PLAYERS = [
@@ -27,14 +28,14 @@ const PLAYERS = [
 ] as const;
 
 const PASSWORDS: Record<(typeof PLAYERS)[number], string> = {
-  Bader: "Ghoul23",
-  Charbel: "0.2kd",
-  Christian: "b4ss0",
-  Edmond: "123eddy123",
-  Edwin: "guzwin1",
-  Justin: "jbcbobj",
-  Marc: "mezapromax",
-  Rayan: "nurumassage",
+  Bader: "bader123",
+  Charbel: "charbel123",
+  Christian: "christian123",
+  Edmond: "edmond123",
+  Edwin: "edwin123",
+  Justin: "justin123",
+  Marc: "marc123",
+  Rayan: "rayan123",
 };
 
 /* -------------------- Types -------------------- */
