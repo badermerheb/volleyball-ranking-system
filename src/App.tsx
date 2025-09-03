@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { Toaster, toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
@@ -50,6 +50,7 @@ interface LeaderboardRow {
   average: number;
   ratings: number;
 }
+type LbResp = { ok: boolean; ready: boolean; raters: number; total: number; rows: LeaderboardRow[] };
 
 /* -------------------- API helpers -------------------- */
 async function apiGet<T>(path: string) {
@@ -70,9 +71,6 @@ async function apiSend<T>(path: string, body: any, method: "POST" | "PATCH" = "P
   }
   return (await res.json()) as T;
 }
-
-type LbResp = { ok: boolean; ready: boolean; raters: number; total: number; rows: LeaderboardRow[] };
-
 async function fetchLeaderboard(): Promise<{ ready: boolean; raters: number; total: number; rows: LeaderboardRow[] }> {
   const data = await apiGet<LbResp>("/leaderboard");
   return { ready: data.ready, raters: data.raters, total: data.total, rows: data.rows ?? [] };
@@ -124,7 +122,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
 
   // loading state for "did this user already submit?"
-  const [myLoading, setMyLoading] = useState(false); // <— NEW
+  const [myLoading, setMyLoading] = useState(false);
 
   // server-backed state
   const [myRatings, setMyRatings] = useState<RatingEntry[]>([]);
@@ -132,6 +130,10 @@ export default function App() {
   const [leaderboardReady, setLeaderboardReady] = useState(false);
   const [ratersCount, setRatersCount] = useState(0);
   const [totalPlayers, setTotalPlayers] = useState<number>(PLAYERS.length);
+  const [lbLoading, setLbLoading] = useState(false);            // <— NEW
+
+  // UI state
+  const [activeTab, setActiveTab] = useState<"rate" | "board">("rate"); // <— NEW
 
   // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
@@ -139,50 +141,78 @@ export default function App() {
   const [currentScore, setCurrentScore] = useState(7);
   const [sessionRatings, setSessionRatings] = useState<{ ratee: string; score: number }[]>([]);
 
-  // Persisted login: restore on mount
+  // helper: refresh leaderboard (with loading flag)
+  async function refreshLeaderboard() {                         // <— NEW
+    try {
+      setLbLoading(true);
+      const lb = await fetchLeaderboard();
+      setLeaderboardRows(lb.rows);
+      setLeaderboardReady(lb.ready);
+      setRatersCount(lb.raters);
+      setTotalPlayers(lb.total);
+    } finally {
+      setLbLoading(false);
+    }
+  }
+
+  // Persisted login: restore on mount + initial leaderboard
   useEffect(() => {
     const cached = localStorage.getItem(LS_USER_KEY);
     if (cached && (PLAYERS as readonly string[]).includes(cached)) {
       setCurrentUser(cached);
-      setMyLoading(true); // we will check /mine below
+      setMyLoading(true);
     }
-    // Always fetch current leaderboard status
-    fetchLeaderboard()
-      .then(({ ready, raters, total, rows }) => {
-        setLeaderboardReady(ready);
-        setRatersCount(raters);
-        setTotalPlayers(total);
-        setLeaderboardRows(rows);
-      })
-      .catch(() => {});
+    refreshLeaderboard().catch(() => {});
   }, []);
 
-  // When user logs in (or after refresh with cached user), pull his set + leaderboard
+  // When user logs in (or after refresh), pull his set + leaderboard
   useEffect(() => {
     if (!currentUser) return;
-    setMyLoading(true); // <— start checking
+    setMyLoading(true);
     (async () => {
       try {
-        const [mine, lb] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
+        const [mine] = await Promise.all([fetchMine(currentUser)]);
         setMyRatings(mine);
-        setLeaderboardRows(lb.rows);
-        setLeaderboardReady(lb.ready);
-        setRatersCount(lb.raters);
-        setTotalPlayers(lb.total);
-      } catch (e) {
+        await refreshLeaderboard();
+      } catch {
         toast.error("Failed to load data from server.");
       } finally {
-        setMyLoading(false); // <— done checking
+        setMyLoading(false);
       }
     })();
   }, [currentUser]);
 
   const hasSubmitted = myRatings.length > 0;
 
+  /* ---------- Tab-driven refresh & polling ---------- */
+  // When switching to Leaderboard tab, refresh immediately
+  useEffect(() => {                                            // <— NEW
+    if (activeTab === "board") {
+      refreshLeaderboard().catch(() => {});
+    }
+  }, [activeTab]);
+
+  // While on Leaderboard and it's not ready, poll every 3s
+  useEffect(() => {                                            // <— NEW
+    if (activeTab !== "board" || leaderboardReady) return;
+    const id = setInterval(() => {
+      refreshLeaderboard().catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [activeTab, leaderboardReady]);
+
+  // Also refresh on window focus if leaderboard tab is active
+  useEffect(() => {                                            // <— NEW
+    function onFocus() {
+      if (activeTab === "board") refreshLeaderboard().catch(() => {});
+    }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [activeTab]);
+
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
-    // hard block if we're still checking or already submitted
-    if (!currentUser || myLoading || hasSubmitted) return; // <— guard
+    if (!currentUser || myLoading || hasSubmitted) return;
     const order = PLAYERS.filter((p) => p !== currentUser);
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
@@ -208,12 +238,9 @@ export default function App() {
     } else {
       try {
         await submitRun(currentUser, nextSession);
-        const [mine, lb] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
+        const mine = await fetchMine(currentUser);
         setMyRatings(mine);
-        setLeaderboardRows(lb.rows);
-        setLeaderboardReady(lb.ready);
-        setRatersCount(lb.raters);
-        setTotalPlayers(lb.total);
+        await refreshLeaderboard(); // <— ensure counts reflect this submission
         toast.success("Ratings submitted.");
       } catch (e: any) {
         if (String(e.message).includes("already_submitted")) {
@@ -248,6 +275,7 @@ export default function App() {
       setRatersCount(0);
       setTotalPlayers(PLAYERS.length);
       toast("All saved ratings cleared for everyone.");
+      if (activeTab === "board") refreshLeaderboard().catch(() => {});
     } catch {
       toast.error("Reset failed.");
     }
@@ -268,7 +296,11 @@ export default function App() {
             setCurrentUser(name);
           }} />
         ) : (
-          <Tabs defaultValue="rate" className="w-full">
+          <Tabs
+            value={activeTab}
+            onValueChange={(v) => setActiveTab(v as "rate" | "board")}  // <— NEW
+            className="w-full"
+          >
             <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="rate">Rate Players</TabsTrigger>
               <TabsTrigger value="board">Leaderboard</TabsTrigger>
@@ -285,8 +317,8 @@ export default function App() {
                 pendingOrder={pendingOrder}
                 onStart={startRatingFlow}
                 hasFinished={sessionRatings.length === PLAYERS.length - 1}
-                hasSubmitted={hasSubmitted}
-                checking={myLoading} // <— NEW
+                hasSubmitted={myRatings.length > 0}
+                checking={myLoading}
               />
             </TabsContent>
 
@@ -305,11 +337,15 @@ export default function App() {
                       The leaderboard will be visible once <span className="font-semibold">all players</span> have submitted their ratings.
                     </p>
                     <p className="text-sm mt-2">
-                      <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
-                      {totalPlayers - ratersCount > 0 && (
-                        <> (<span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)</>
+                      {lbLoading ? "Refreshing…" : (
+                        <>
+                          <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
+                          {totalPlayers - ratersCount > 0 && (
+                            <> (<span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)</>
+                          )}
+                          .
+                        </>
                       )}
-                      .
                     </p>
                   </CardContent>
                 </Card>
@@ -347,7 +383,7 @@ function Header({
             Volleyball Ranking
           </h1>
           <p className="text-sm text-muted-foreground">
-            Secure per-player ratings • Clean flow • One-shot submissions
+            Secure per-player ratings • One-shot submissions
           </p>
         </div>
       </div>
@@ -444,7 +480,7 @@ function RateFlow({
   currentScore,
   hasFinished,
   hasSubmitted,
-  checking, // <— NEW
+  checking,
   onScoreChange,
   onSubmitOne,
   onStart,
@@ -455,7 +491,7 @@ function RateFlow({
   currentScore: number;
   hasFinished: boolean;
   hasSubmitted: boolean;
-  checking: boolean; // <— NEW
+  checking: boolean;
   onScoreChange: (v: number) => void;
   onSubmitOne: () => void;
   onStart: () => void;
