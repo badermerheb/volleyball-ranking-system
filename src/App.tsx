@@ -128,7 +128,8 @@ export default function App() {
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
   const [leaderboardReady, setLeaderboardReady] = useState(false);
   const [ratersCount, setRatersCount] = useState(0);   // <— NEW
-  const [totalPlayers, setTotalPlayers] = useState(PLAYERS.length); // <— NEW (server also returns it)
+  const [totalPlayers, setTotalPlayers] = useState<number>(PLAYERS.length);
+
 
   // Persisted login: restore on mount
   useEffect(() => {
