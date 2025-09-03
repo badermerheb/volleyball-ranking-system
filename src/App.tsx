@@ -9,10 +9,9 @@ import { Slider } from "./components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Separator } from "./components/ui/separator";
 import { Badge } from "./components/ui/badge";
-import { ShieldCheck, LogOut, Trophy, UserRound, RefreshCcw, BarChart3 } from "lucide-react";
+import { ShieldCheck, LogOut, Trophy, RefreshCcw, BarChart3 } from "lucide-react";
 
 /* -------------------- Config -------------------- */
-// src/App.tsx
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
 
 /* -------------------- Domain Data -------------------- */
@@ -64,15 +63,16 @@ async function apiSend<T>(path: string, body: any, method: "POST" | "PATCH" = "P
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const msg = await res.text().catch(() => "");
+    let msg = "";
+    try { msg = (await res.json()).error; } catch {}
     throw new Error(msg || `${res.status} ${res.statusText}`);
   }
   return (await res.json()) as T;
 }
 
-async function fetchLeaderboard(): Promise<LeaderboardRow[]> {
-  const data = await apiGet<{ ok: boolean; rows: LeaderboardRow[] }>("/leaderboard");
-  return data.rows ?? [];
+async function fetchLeaderboard(): Promise<{ ready: boolean; rows: LeaderboardRow[] }> {
+  const data = await apiGet<{ ok: boolean; ready: boolean; rows: LeaderboardRow[] }>("/leaderboard");
+  return { ready: data.ready, rows: data.rows ?? [] };
 }
 async function fetchMine(name: string): Promise<RatingEntry[]> {
   const data = await apiGet<{ ok: boolean; ratings: RatingEntry[] }>(`/mine?name=${encodeURIComponent(name)}`);
@@ -84,13 +84,6 @@ async function submitRun(name: string, entries: { ratee: string; score: number }
     password: PASSWORDS[name as keyof typeof PASSWORDS],
     entries,
   });
-}
-async function batchSave(name: string, scores: Record<string, number>) {
-  return apiSend<{ ok: boolean }>("/mine", {
-    name,
-    password: PASSWORDS[name as keyof typeof PASSWORDS],
-    scores,
-  }, "PATCH");
 }
 async function adminReset(name: string) {
   return apiSend<{ ok: boolean }>("/reset", {
@@ -130,6 +123,7 @@ export default function App() {
   // server-backed state
   const [myRatings, setMyRatings] = useState<RatingEntry[]>([]);
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
+  const [leaderboardReady, setLeaderboardReady] = useState(false);
 
   // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
@@ -137,9 +131,12 @@ export default function App() {
   const [currentScore, setCurrentScore] = useState(7);
   const [sessionRatings, setSessionRatings] = useState<{ ratee: string; score: number }[]>([]);
 
-  // load leaderboard on mount (optional; you can also defer until login)
+  // load leaderboard status on mount
   useEffect(() => {
-    fetchLeaderboard().then(setLeaderboardRows).catch(() => {});
+    fetchLeaderboard().then(({ ready, rows }) => {
+      setLeaderboardReady(ready);
+      setLeaderboardRows(rows);
+    }).catch(() => {});
   }, []);
 
   // when user logs in, pull his current set + latest leaderboard
@@ -147,20 +144,21 @@ export default function App() {
     if (!currentUser) return;
     (async () => {
       try {
-        const [mine, rows] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
+        const [mine, lb] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
         setMyRatings(mine);
-        setLeaderboardRows(rows);
+        setLeaderboardRows(lb.rows);
+        setLeaderboardReady(lb.ready);
       } catch (e) {
         toast.error("Failed to load data from server.");
       }
     })();
   }, [currentUser]);
 
-  const leaderboardMemo = useMemo(() => leaderboardRows, [leaderboardRows]);
+  const hasSubmitted = myRatings.length > 0;
 
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
-    if (!currentUser) return;
+    if (!currentUser || hasSubmitted) return;
     const order = PLAYERS.filter((p) => p !== currentUser);
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
@@ -172,21 +170,6 @@ export default function App() {
     setCurrentIndex(0);
     setCurrentScore(7);
     setSessionRatings([]);
-  }
-
-  async function startFreshRun() {
-    if (!currentUser) return;
-    try {
-      // Clear my set on server (empty scores -> remove my entries)
-      await batchSave(currentUser, {});
-      const [mine, rows] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
-      setMyRatings(mine);
-      setLeaderboardRows(rows);
-      toast("Your previous submissions were cleared. Starting a fresh run.");
-      startRatingFlow();
-    } catch {
-      toast.error("Failed to start fresh run.");
-    }
   }
 
   async function submitOne() {
@@ -202,12 +185,17 @@ export default function App() {
       // finalize: send to server and refresh local views
       try {
         await submitRun(currentUser, nextSession);
-        const [mine, rows] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
+        const [mine, lb] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
         setMyRatings(mine);
-        setLeaderboardRows(rows);
-        toast.success("Ratings submitted. Leaderboard updated.");
-      } catch (e) {
-        toast.error("Failed to submit ratings.");
+        setLeaderboardRows(lb.rows);
+        setLeaderboardReady(lb.ready);
+        toast.success("Ratings submitted.");
+      } catch (e: any) {
+        if (String(e.message).includes("already_submitted")) {
+          toast.error("You have already submitted. Wait for admin reset to rate again.");
+        } else {
+          toast.error("Failed to submit ratings.");
+        }
       }
     }
   }
@@ -227,25 +215,13 @@ export default function App() {
     }
     try {
       await adminReset("Bader");
+      // after reset, clear local state & re-check leaderboard
       setMyRatings([]);
       setLeaderboardRows([]);
+      setLeaderboardReady(false);
       toast("All saved ratings cleared for everyone.");
     } catch {
       toast.error("Reset failed.");
-    }
-  }
-
-  /* ---------- Batch Save from History ---------- */
-  async function updateMyBatchRatings(newScores: Record<string, number>) {
-    if (!currentUser) return;
-    try {
-      await batchSave(currentUser, newScores);
-      const [mine, rows] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
-      setMyRatings(mine);
-      setLeaderboardRows(rows);
-      toast.success("All changes saved.");
-    } catch {
-      toast.error("Failed to save changes.");
     }
   }
 
@@ -262,10 +238,9 @@ export default function App() {
           <LoginCard onLogin={setCurrentUser} />
         ) : (
           <Tabs defaultValue="rate" className="w-full">
-            <TabsList className="grid w-full grid-cols-3">
+            <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="rate">Rate Players</TabsTrigger>
               <TabsTrigger value="board">Leaderboard</TabsTrigger>
-              <TabsTrigger value="history">My Submissions</TabsTrigger>
             </TabsList>
 
             <TabsContent value="rate">
@@ -278,21 +253,28 @@ export default function App() {
                 onSubmitOne={submitOne}
                 pendingOrder={pendingOrder}
                 onStart={startRatingFlow}
-                onStartFresh={startFreshRun}
                 hasFinished={sessionRatings.length === PLAYERS.length - 1}
+                hasSubmitted={hasSubmitted}
               />
             </TabsContent>
 
             <TabsContent value="board">
-              <Leaderboard rows={leaderboardMemo} />
-            </TabsContent>
-
-            <TabsContent value="history">
-              <History
-                allRatings={myRatings}
-                me={currentUser}
-                onBatchSave={updateMyBatchRatings}
-              />
+              {leaderboardReady ? (
+                <Leaderboard rows={leaderboardRows} />
+              ) : (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Trophy className="h-5 w-5" /> Leaderboard (Locked)
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-sm text-muted-foreground">
+                      The leaderboard will be visible once <span className="font-semibold">all players</span> have submitted their ratings.
+                    </p>
+                  </CardContent>
+                </Card>
+              )}
             </TabsContent>
           </Tabs>
         )}
@@ -326,7 +308,7 @@ function Header({
             Volleyball Ranking
           </h1>
           <p className="text-sm text-muted-foreground">
-            Secure per-player ratings • Clean flow • Instant averages
+            Secure per-player ratings • Clean flow • One-shot submissions
           </p>
         </div>
       </div>
@@ -365,8 +347,6 @@ function LoginCard({ onLogin }: { onLogin: (name: string) => void }) {
       toast.error("Unknown player. Use one of the 8 names.");
       return;
     }
-    // Optional: hit /login, but since we use predefined passwords on each call,
-    // we can just do a quick in-memory check here:
     if (PASSWORDS[normalized] !== pass) {
       toast.error("Wrong password.");
       return;
@@ -409,7 +389,7 @@ function LoginCard({ onLogin }: { onLogin: (name: string) => void }) {
             Continue
           </Button>
           <p className="text-xs text-muted-foreground">
-            Tip: This connects to your local Node server (JSON file). Swap for a real DB later.
+            You can submit exactly once per reset. Admin can reset to start a new round.
           </p>
         </form>
       </CardContent>
@@ -424,20 +404,20 @@ function RateFlow({
   currentIndex,
   currentScore,
   hasFinished,
+  hasSubmitted,
   onScoreChange,
   onSubmitOne,
   onStart,
-  onStartFresh,
 }: {
   currentUser: string;
   pendingOrder: string[];
   currentIndex: number;
   currentScore: number;
   hasFinished: boolean;
+  hasSubmitted: boolean;
   onScoreChange: (v: number) => void;
   onSubmitOne: () => void;
   onStart: () => void;
-  onStartFresh: () => void;
 }) {
   const inProgress = pendingOrder.length > 0 && !hasFinished;
   const done = pendingOrder.length > 0 && hasFinished;
@@ -455,14 +435,25 @@ function RateFlow({
       <CardContent>
         {!inProgress && !done && (
           <div className="grid place-items-center py-8 gap-6">
-            <p className="text-center text-sm text-muted-foreground max-w-prose">
-              You'll be shown each teammate (except yourself) one by one. Slide
-              to rate from 1 (lowest) to 10 (highest). After you submit the last
-              rating, the leaderboard updates automatically.
-            </p>
-            <Button size="lg" onClick={onStart}>
-              Start Rating
-            </Button>
+            {hasSubmitted ? (
+              <>
+                <p className="text-center text-sm text-muted-foreground max-w-prose">
+                  You’ve already submitted your ratings for this round. Wait for the leaderboard to unlock (once everyone submits), or ask the admin to reset for a new round.
+                </p>
+                <Button size="lg" disabled>
+                  Start Rating
+                </Button>
+              </>
+            ) : (
+              <>
+                <p className="text-center text-sm text-muted-foreground max-w-prose">
+                  You'll be shown each teammate (except yourself) one by one. Slide to rate from 1 (lowest) to 10 (highest). You can only submit once per round.
+                </p>
+                <Button size="lg" onClick={onStart}>
+                  Start Rating
+                </Button>
+              </>
+            )}
           </div>
         )}
 
@@ -524,13 +515,9 @@ function RateFlow({
             <div className="text-center">
               <h3 className="text-xl font-semibold">All set!</h3>
               <p className="text-sm text-muted-foreground">
-                Your ratings were saved. Jump to the leaderboard to see updated
-                averages.
+                Your ratings were saved. You can't submit again until the admin resets the round.
               </p>
             </div>
-            <Button onClick={onStartFresh} variant="secondary">
-              Rate Again (new order)
-            </Button>
           </div>
         )}
       </CardContent>
@@ -550,7 +537,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
       <CardContent>
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No ratings yet. Once players submit, the leaderboard will populate.
+            No ratings yet.
           </p>
         ) : (
           <div className="grid gap-3">
@@ -584,102 +571,11 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   );
 }
 
-/* -------------------- History (Batch Save) -------------------- */
-function History({
-  allRatings,
-  me,
-  onBatchSave,
-}: {
-  allRatings: RatingEntry[];
-  me: string;
-  onBatchSave: (newScores: Record<string, number>) => void;
-}) {
-  const mine = allRatings.sort((a, b) => a.ratee.localeCompare(b.ratee));
-
-  const [local, setLocal] = useState<Record<string, number>>(
-    Object.fromEntries(mine.map((r) => [r.ratee, r.score]))
-  );
-
-  useEffect(() => {
-    setLocal(Object.fromEntries(mine.map((r) => [r.ratee, r.score])));
-  }, [allRatings, me]);
-
-  const hasChanges =
-    mine.length !== Object.keys(local).length ||
-    mine.some((r) => local[r.ratee] !== r.score);
-
-  function saveAll() {
-    if (!hasChanges) return;
-    onBatchSave(local);
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center justify-between">
-          <span className="flex items-center gap-2">
-            <UserRound className="h-5 w-5" /> My Submissions
-          </span>
-          <Button size="sm" onClick={saveAll} disabled={!hasChanges}>
-            Save all changes
-          </Button>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {mine.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            You haven't submitted any ratings yet.
-          </p>
-        ) : (
-          <div className="grid gap-3">
-            {mine.map((r) => (
-              <div
-                key={r.ratee}
-                className="grid grid-cols-[auto_1fr_auto] items-center gap-3 p-3 rounded-2xl bg-card/60 border"
-              >
-                <div className="flex items-center gap-3">
-                  <Avatar name={r.ratee} size={36} />
-                  <div>
-                    <div className="font-medium">{r.ratee}</div>
-                    <div className="text-[11px] text-muted-foreground">
-                      last updated {new Date(r.timestamp).toLocaleString()}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="px-2">
-                  <Slider
-                    min={1}
-                    max={10}
-                    step={1}
-                    value={[local[r.ratee] ?? r.score]}
-                    onValueChange={(v) =>
-                      setLocal((s) => ({ ...s, [r.ratee]: v[0] ?? r.score }))
-                    }
-                  />
-                </div>
-
-                <div className="w-10 text-right font-semibold">
-                  {local[r.ratee] ?? r.score}
-                </div>
-              </div>
-            ))}
-            <div className="text-xs text-muted-foreground">
-              Click <span className="font-semibold">Save all changes</span> to apply every edit at once.
-              Your entire set replaces the previous one.
-            </div>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 /* -------------------- Footer -------------------- */
 function Footer() {
   return (
     <div className="text-center text-xs text-muted-foreground py-2">
-      Built for clean, unbiased team ratings. Backed by a tiny Node/Express JSON API.
+      One-shot, unbiased team ratings. Admin can reset to start a new round.
     </div>
   );
 }

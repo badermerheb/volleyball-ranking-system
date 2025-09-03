@@ -50,22 +50,39 @@ app.post("/login", (req, res) => {
   return res.status(401).json({ ok: false, error: "invalid_credentials" });
 });
 
-// replace entire set for rater
+/**
+ * Replace entire set for rater (ONE-SHOT).
+ * If this rater has already submitted at least once (has any rows), reject with 409.
+ */
 app.post("/submit", async (req, res) => {
   const { name, password, entries } = req.body || {};
-  if (!checkCreds(name, password)) return res.status(401).json({ ok:false, error:"invalid_credentials" });
-  if (!Array.isArray(entries) || entries.length === 0) return res.status(400).json({ ok:false, error:"entries_required" });
-
+  if (!checkCreds(name, password)) {
+    return res.status(401).json({ ok:false, error:"invalid_credentials" });
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return res.status(400).json({ ok:false, error:"entries_required" });
+  }
   for (const e of entries) {
-    if (!PLAYERS.includes(e.ratee) || e.ratee === name) return res.status(400).json({ ok:false, error:"invalid_ratee" });
-    if (!Number.isFinite(e.score) || e.score < 1 || e.score > 10) return res.status(400).json({ ok:false, error:"invalid_score" });
+    if (!PLAYERS.includes(e.ratee) || e.ratee === name) {
+      return res.status(400).json({ ok:false, error:"invalid_ratee" });
+    }
+    if (!Number.isFinite(e.score) || e.score < 1 || e.score > 10) {
+      return res.status(400).json({ ok:false, error:"invalid_score" });
+    }
   }
 
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    await client.query("DELETE FROM ratings WHERE rater = $1", [name]);
+    // Has this rater already submitted?
+    const existing = await client.query(
+      "SELECT 1 FROM ratings WHERE rater = $1 LIMIT 1",
+      [name]
+    );
+    if (existing.rowCount > 0) {
+      return res.status(409).json({ ok:false, error:"already_submitted" });
+    }
 
+    await client.query("BEGIN");
     const ts = now();
     const values = [];
     const placeholders = [];
@@ -106,53 +123,20 @@ app.get("/mine", async (req, res) => {
   }
 });
 
-// batch replace my set (used by 'Save all changes' and 'Rate Again fresh')
-app.patch("/mine", async (req, res) => {
-  const { name, password, scores } = req.body || {};
-  if (!checkCreds(name, password)) return res.status(401).json({ ok:false, error:"invalid_credentials" });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("DELETE FROM ratings WHERE rater = $1", [name]);
-
-    // if scores is falsy or empty object -> just clear and return
-    if (scores && Object.keys(scores).length) {
-      const ts = now();
-      const entries = Object.entries(scores);
-      // validation
-      for (const [ratee, score] of entries) {
-        const num = Number(score);
-        if (!PLAYERS.includes(ratee) || ratee === name) throw new Error("invalid_ratee");
-        if (!Number.isFinite(num) || num < 1 || num > 10) throw new Error("invalid_score");
-      }
-      const values = [];
-      const placeholders = [];
-      entries.forEach(([ratee, score], i) => {
-        values.push(name, ratee, Math.round(Number(score)), ts);
-        const b = i * 4;
-        placeholders.push(`($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4})`);
-      });
-      await client.query(
-        `INSERT INTO ratings (rater, ratee, score, ts) VALUES ${placeholders.join(",")}`,
-        values
-      );
-    }
-
-    await client.query("COMMIT");
-    res.json({ ok:true });
-  } catch (e) {
-    await client.query("ROLLBACK");
-    console.error(e);
-    res.status(400).json({ ok:false, error:e.message || "db_error" });
-  } finally {
-    client.release();
-  }
-});
-
-// leaderboard
+/**
+ * Leaderboard
+ * - Returns rows
+ * - Returns `ready: true` only when ALL players have submitted (distinct raters = PLAYERS.length).
+ *   Frontend should hide the leaderboard UI unless ready=true.
+ */
 app.get("/leaderboard", async (_req, res) => {
   try {
+    const readyCheck = await pool.query(
+      "SELECT COUNT(DISTINCT rater) AS c FROM ratings"
+    );
+    const distinctRaters = Number(readyCheck.rows[0]?.c ?? 0);
+    const ready = distinctRaters >= PLAYERS.length;
+
     const { rows } = await pool.query(
       `
       SELECT
@@ -166,8 +150,10 @@ app.get("/leaderboard", async (_req, res) => {
       `,
       PLAYERS
     );
+
     res.json({
       ok:true,
+      ready,
       rows: rows.map(r => ({
         player: r.player,
         average: Number(r.average),
@@ -180,10 +166,17 @@ app.get("/leaderboard", async (_req, res) => {
   }
 });
 
+// No edits allowed after submission: remove/disable batch endpoint
+app.patch("/mine", (_req, res) => {
+  res.status(405).json({ ok:false, error:"editing_disabled" });
+});
+
 // admin reset
 app.post("/reset", async (req, res) => {
   const { name, password } = req.body || {};
-  if (!(name === "Bader" && checkCreds(name, password))) return res.status(403).json({ ok:false, error:"admin_only" });
+  if (!(name === "Bader" && checkCreds(name, password))) {
+    return res.status(403).json({ ok:false, error:"admin_only" });
+  }
   try {
     await pool.query("DELETE FROM ratings");
     res.json({ ok:true });
