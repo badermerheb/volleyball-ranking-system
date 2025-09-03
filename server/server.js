@@ -129,13 +129,15 @@ app.get("/mine", async (req, res) => {
  * - Returns `ready: true` only when ALL players have submitted (distinct raters = PLAYERS.length).
  *   Frontend should hide the leaderboard UI unless ready=true.
  */
+// leaderboard
 app.get("/leaderboard", async (_req, res) => {
   try {
     const readyCheck = await pool.query(
       "SELECT COUNT(DISTINCT rater) AS c FROM ratings"
     );
     const distinctRaters = Number(readyCheck.rows[0]?.c ?? 0);
-    const ready = distinctRaters >= PLAYERS.length;
+    const totalPlayers = PLAYERS.length;
+    const ready = distinctRaters >= totalPlayers;
 
     const { rows } = await pool.query(
       `
@@ -152,8 +154,10 @@ app.get("/leaderboard", async (_req, res) => {
     );
 
     res.json({
-      ok:true,
+      ok: true,
       ready,
+      raters: distinctRaters,   // <— NEW
+      total: totalPlayers,      // <— NEW
       rows: rows.map(r => ({
         player: r.player,
         average: Number(r.average),

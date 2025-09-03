@@ -13,6 +13,7 @@ import { ShieldCheck, LogOut, Trophy, RefreshCcw, BarChart3 } from "lucide-react
 
 /* -------------------- Config -------------------- */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
+const LS_USER_KEY = "vb_current_user"; // <— persist login
 
 /* -------------------- Domain Data -------------------- */
 const PLAYERS = [
@@ -70,9 +71,11 @@ async function apiSend<T>(path: string, body: any, method: "POST" | "PATCH" = "P
   return (await res.json()) as T;
 }
 
-async function fetchLeaderboard(): Promise<{ ready: boolean; rows: LeaderboardRow[] }> {
-  const data = await apiGet<{ ok: boolean; ready: boolean; rows: LeaderboardRow[] }>("/leaderboard");
-  return { ready: data.ready, rows: data.rows ?? [] };
+type LbResp = { ok: boolean; ready: boolean; raters: number; total: number; rows: LeaderboardRow[] };
+
+async function fetchLeaderboard(): Promise<{ ready: boolean; raters: number; total: number; rows: LeaderboardRow[] }> {
+  const data = await apiGet<LbResp>("/leaderboard");
+  return { ready: data.ready, raters: data.raters, total: data.total, rows: data.rows ?? [] };
 }
 async function fetchMine(name: string): Promise<RatingEntry[]> {
   const data = await apiGet<{ ok: boolean; ratings: RatingEntry[] }>(`/mine?name=${encodeURIComponent(name)}`);
@@ -124,22 +127,27 @@ export default function App() {
   const [myRatings, setMyRatings] = useState<RatingEntry[]>([]);
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
   const [leaderboardReady, setLeaderboardReady] = useState(false);
+  const [ratersCount, setRatersCount] = useState(0);   // <— NEW
+  const [totalPlayers, setTotalPlayers] = useState(PLAYERS.length); // <— NEW (server also returns it)
 
-  // rating session state (client-only until submit)
-  const [pendingOrder, setPendingOrder] = useState<string[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [currentScore, setCurrentScore] = useState(7);
-  const [sessionRatings, setSessionRatings] = useState<{ ratee: string; score: number }[]>([]);
-
-  // load leaderboard status on mount
+  // Persisted login: restore on mount
   useEffect(() => {
-    fetchLeaderboard().then(({ ready, rows }) => {
-      setLeaderboardReady(ready);
-      setLeaderboardRows(rows);
-    }).catch(() => {});
+    const cached = localStorage.getItem(LS_USER_KEY);
+    if (cached && PLAYERS.includes(cached as any)) {
+      setCurrentUser(cached);
+    }
+    // Always fetch current leaderboard status
+    fetchLeaderboard()
+      .then(({ ready, raters, total, rows }) => {
+        setLeaderboardReady(ready);
+        setRatersCount(raters);
+        setTotalPlayers(total);
+        setLeaderboardRows(rows);
+      })
+      .catch(() => {});
   }, []);
 
-  // when user logs in, pull his current set + latest leaderboard
+  // When user logs in (or after refresh with cached user), pull his set + leaderboard
   useEffect(() => {
     if (!currentUser) return;
     (async () => {
@@ -148,6 +156,8 @@ export default function App() {
         setMyRatings(mine);
         setLeaderboardRows(lb.rows);
         setLeaderboardReady(lb.ready);
+        setRatersCount(lb.raters);
+        setTotalPlayers(lb.total);
       } catch (e) {
         toast.error("Failed to load data from server.");
       }
@@ -172,6 +182,11 @@ export default function App() {
     setSessionRatings([]);
   }
 
+  const [pendingOrder, setPendingOrder] = useState<string[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentScore, setCurrentScore] = useState(7);
+  const [sessionRatings, setSessionRatings] = useState<{ ratee: string; score: number }[]>([]);
+
   async function submitOne() {
     if (!currentUser) return;
     const ratee = pendingOrder[currentIndex];
@@ -182,13 +197,14 @@ export default function App() {
       setCurrentIndex((i) => i + 1);
       setCurrentScore(7);
     } else {
-      // finalize: send to server and refresh local views
       try {
         await submitRun(currentUser, nextSession);
         const [mine, lb] = await Promise.all([fetchMine(currentUser), fetchLeaderboard()]);
         setMyRatings(mine);
         setLeaderboardRows(lb.rows);
         setLeaderboardReady(lb.ready);
+        setRatersCount(lb.raters);
+        setTotalPlayers(lb.total);
         toast.success("Ratings submitted.");
       } catch (e: any) {
         if (String(e.message).includes("already_submitted")) {
@@ -202,6 +218,7 @@ export default function App() {
 
   function handleLogout() {
     setCurrentUser(null);
+    localStorage.removeItem(LS_USER_KEY); // <— clear persisted login
     setPendingOrder([]);
     setCurrentIndex(0);
     setSessionRatings([]);
@@ -215,10 +232,11 @@ export default function App() {
     }
     try {
       await adminReset("Bader");
-      // after reset, clear local state & re-check leaderboard
       setMyRatings([]);
       setLeaderboardRows([]);
       setLeaderboardReady(false);
+      setRatersCount(0);
+      setTotalPlayers(PLAYERS.length);
       toast("All saved ratings cleared for everyone.");
     } catch {
       toast.error("Reset failed.");
@@ -235,7 +253,10 @@ export default function App() {
           isAdmin={currentUser === "Bader"}
         />
         {!currentUser ? (
-          <LoginCard onLogin={setCurrentUser} />
+          <LoginCard onLogin={(name) => {
+            localStorage.setItem(LS_USER_KEY, name); // <— persist on login
+            setCurrentUser(name);
+          }} />
         ) : (
           <Tabs defaultValue="rate" className="w-full">
             <TabsList className="grid w-full grid-cols-2">
@@ -271,6 +292,13 @@ export default function App() {
                   <CardContent>
                     <p className="text-sm text-muted-foreground">
                       The leaderboard will be visible once <span className="font-semibold">all players</span> have submitted their ratings.
+                    </p>
+                    <p className="text-sm mt-2">
+                      <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
+                      {totalPlayers - ratersCount > 0 && (
+                        <> (<span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)</>
+                      )}
+                      .
                     </p>
                   </CardContent>
                 </Card>
@@ -536,9 +564,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
       </CardHeader>
       <CardContent>
         {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No ratings yet.
-          </p>
+          <p className="text-sm text-muted-foreground">No ratings yet.</p>
         ) : (
           <div className="grid gap-3">
             {rows.map((r, idx) => (
@@ -580,7 +606,7 @@ function Footer() {
   );
 }
 
-/* -------------------- Tiny utilities for deterministic shuffles -------------------- */
+/* -------------------- Tiny utilities -------------------- */
 function hashStr(str: string) {
   let h = 2166136261 >>> 0;
   for (let i = 0; i < str.length; i++) {
