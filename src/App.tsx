@@ -323,33 +323,51 @@ export default function App() {
             </TabsContent>
 
             <TabsContent value="board">
-              {leaderboardReady ? (
-                <Leaderboard rows={leaderboardRows} />
-              ) : (
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Trophy className="h-5 w-5" /> Leaderboard (Locked)
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-sm text-muted-foreground">
-                      The leaderboard will be visible once <span className="font-semibold">all players</span> have submitted their ratings.
-                    </p>
-                    <p className="text-sm mt-2">
-                      {lbLoading ? "Refreshing…" : (
-                        <>
-                          <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
-                          {totalPlayers - ratersCount > 0 && (
-                            <> (<span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)</>
+              <AnimatePresence mode="wait">
+                {leaderboardReady ? (
+                  <motion.div
+                    key="leaderboard"
+                    initial={{ opacity: 0, y: 16, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -12, scale: 0.98 }}
+                    transition={{ type: "spring", stiffness: 220, damping: 24 }}
+                  >
+                    <Leaderboard rows={leaderboardRows} />
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="locked"
+                    initial={{ opacity: 0, y: 16 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <Trophy className="h-5 w-5" /> Leaderboard (Locked)
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <p className="text-sm text-muted-foreground">
+                          The leaderboard will be visible once <span className="font-semibold">all players</span> have submitted their ratings.
+                        </p>
+                        <p className="text-sm mt-2">
+                          {lbLoading ? "Refreshing…" : (
+                            <>
+                              <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
+                              {totalPlayers - ratersCount > 0 && (
+                                <> (<span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)</>
+                              )}
+                              .
+                            </>
                           )}
-                          .
-                        </>
-                      )}
-                    </p>
-                  </CardContent>
-                </Card>
-              )}
+                        </p>
+                      </CardContent>
+                    </Card>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </TabsContent>
           </Tabs>
         )}
