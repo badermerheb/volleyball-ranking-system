@@ -9,6 +9,7 @@ import { Slider } from "./components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Separator } from "./components/ui/separator";
 import { Badge } from "./components/ui/badge";
+import type { Variants } from "framer-motion";
 import { ShieldCheck, LogOut, Trophy, RefreshCcw, BarChart3 } from "lucide-react";
 
 /* -------------------- Config -------------------- */
@@ -50,7 +51,13 @@ interface LeaderboardRow {
   average: number;
   ratings: number;
 }
-type LbResp = { ok: boolean; ready: boolean; raters: number; total: number; rows: LeaderboardRow[] };
+type LbResp = {
+  ok: boolean;
+  ready: boolean;
+  raters: number;
+  total: number;
+  rows: LeaderboardRow[];
+};
 
 /* -------------------- API helpers -------------------- */
 async function apiGet<T>(path: string) {
@@ -58,7 +65,11 @@ async function apiGet<T>(path: string) {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
-async function apiSend<T>(path: string, body: any, method: "POST" | "PATCH" = "POST") {
+async function apiSend<T>(
+  path: string,
+  body: any,
+  method: "POST" | "PATCH" = "POST"
+) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
@@ -66,20 +77,37 @@ async function apiSend<T>(path: string, body: any, method: "POST" | "PATCH" = "P
   });
   if (!res.ok) {
     let msg = "";
-    try { msg = (await res.json()).error; } catch {}
+    try {
+      msg = (await res.json()).error;
+    } catch {}
     throw new Error(msg || `${res.status} ${res.statusText}`);
   }
   return (await res.json()) as T;
 }
-async function fetchLeaderboard(): Promise<{ ready: boolean; raters: number; total: number; rows: LeaderboardRow[] }> {
+async function fetchLeaderboard(): Promise<{
+  ready: boolean;
+  raters: number;
+  total: number;
+  rows: LeaderboardRow[];
+}> {
   const data = await apiGet<LbResp>("/leaderboard");
-  return { ready: data.ready, raters: data.raters, total: data.total, rows: data.rows ?? [] };
+  return {
+    ready: data.ready,
+    raters: data.raters,
+    total: data.total,
+    rows: data.rows ?? [],
+  };
 }
 async function fetchMine(name: string): Promise<RatingEntry[]> {
-  const data = await apiGet<{ ok: boolean; ratings: RatingEntry[] }>(`/mine?name=${encodeURIComponent(name)}`);
+  const data = await apiGet<{ ok: boolean; ratings: RatingEntry[] }>(
+    `/mine?name=${encodeURIComponent(name)}`
+  );
   return data.ratings ?? [];
 }
-async function submitRun(name: string, entries: { ratee: string; score: number }[]) {
+async function submitRun(
+  name: string,
+  entries: { ratee: string; score: number }[]
+) {
   return apiSend<{ ok: boolean }>("/submit", {
     name,
     password: PASSWORDS[name as keyof typeof PASSWORDS],
@@ -95,8 +123,14 @@ async function adminReset(name: string) {
 
 /* -------------------- Avatar / Dots -------------------- */
 function Avatar({ name, size = 56 }: { name: string; size?: number }) {
-  const initials = name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase();
-  const hue = Math.abs([...name].reduce((acc, ch) => acc + ch.charCodeAt(0), 0)) % 360;
+  const initials = name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  const hue =
+    Math.abs([...name].reduce((acc, ch) => acc + ch.charCodeAt(0), 0)) % 360;
   return (
     <div
       className="grid place-items-center text-white font-semibold rounded-2xl shadow"
@@ -111,7 +145,12 @@ function Dots({ total, index }: { total: number; index: number }) {
   return (
     <div className="flex items-center gap-1 mt-4">
       {Array.from({ length: total }).map((_, i) => (
-        <div key={i} className={`h-2 w-2 rounded-full ${i <= index ? "bg-foreground/80" : "bg-foreground/20"}`} />
+        <div
+          key={i}
+          className={`h-2 w-2 rounded-full ${
+            i <= index ? "bg-foreground/80" : "bg-foreground/20"
+          }`}
+        />
       ))}
     </div>
   );
@@ -130,19 +169,21 @@ export default function App() {
   const [leaderboardReady, setLeaderboardReady] = useState(false);
   const [ratersCount, setRatersCount] = useState(0);
   const [totalPlayers, setTotalPlayers] = useState<number>(PLAYERS.length);
-  const [lbLoading, setLbLoading] = useState(false);            // <— NEW
+  const [lbLoading, setLbLoading] = useState(false);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<"rate" | "board">("rate"); // <— NEW
+  const [activeTab, setActiveTab] = useState<"rate" | "board">("rate");
 
   // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentScore, setCurrentScore] = useState(7);
-  const [sessionRatings, setSessionRatings] = useState<{ ratee: string; score: number }[]>([]);
+  const [sessionRatings, setSessionRatings] = useState<
+    { ratee: string; score: number }[]
+  >([]);
 
   // helper: refresh leaderboard (with loading flag)
-  async function refreshLeaderboard() {                         // <— NEW
+  async function refreshLeaderboard() {
     try {
       setLbLoading(true);
       const lb = await fetchLeaderboard();
@@ -185,15 +226,13 @@ export default function App() {
   const hasSubmitted = myRatings.length > 0;
 
   /* ---------- Tab-driven refresh & polling ---------- */
-  // When switching to Leaderboard tab, refresh immediately
-  useEffect(() => {                                            // <— NEW
+  useEffect(() => {
     if (activeTab === "board") {
       refreshLeaderboard().catch(() => {});
     }
   }, [activeTab]);
 
-  // While on Leaderboard and it's not ready, poll every 3s
-  useEffect(() => {                                            // <— NEW
+  useEffect(() => {
     if (activeTab !== "board" || leaderboardReady) return;
     const id = setInterval(() => {
       refreshLeaderboard().catch(() => {});
@@ -201,8 +240,7 @@ export default function App() {
     return () => clearInterval(id);
   }, [activeTab, leaderboardReady]);
 
-  // Also refresh on window focus if leaderboard tab is active
-  useEffect(() => {                                            // <— NEW
+  useEffect(() => {
     function onFocus() {
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
     }
@@ -240,11 +278,13 @@ export default function App() {
         await submitRun(currentUser, nextSession);
         const mine = await fetchMine(currentUser);
         setMyRatings(mine);
-        await refreshLeaderboard(); // <— ensure counts reflect this submission
+        await refreshLeaderboard(); // ensure counts reflect this submission
         toast.success("Ratings submitted.");
       } catch (e: any) {
         if (String(e.message).includes("already_submitted")) {
-          toast.error("You have already submitted. Wait for admin reset to rate again.");
+          toast.error(
+            "You have already submitted. Wait for admin reset to rate again."
+          );
         } else {
           toast.error("Failed to submit ratings.");
         }
@@ -291,14 +331,16 @@ export default function App() {
           isAdmin={currentUser === "Bader"}
         />
         {!currentUser ? (
-          <LoginCard onLogin={(name) => {
-            localStorage.setItem(LS_USER_KEY, name);
-            setCurrentUser(name);
-          }} />
+          <LoginCard
+            onLogin={(name) => {
+              localStorage.setItem(LS_USER_KEY, name);
+              setCurrentUser(name);
+            }}
+          />
         ) : (
           <Tabs
             value={activeTab}
-            onValueChange={(v) => setActiveTab(v as "rate" | "board")}  // <— NEW
+            onValueChange={(v) => setActiveTab(v as "rate" | "board")}
             className="w-full"
           >
             <TabsList className="grid w-full grid-cols-2">
@@ -350,14 +392,26 @@ export default function App() {
                       </CardHeader>
                       <CardContent>
                         <p className="text-sm text-muted-foreground">
-                          The leaderboard will be visible once <span className="font-semibold">all players</span> have submitted their ratings.
+                          The leaderboard will be visible once{" "}
+                          <span className="font-semibold">all players</span>{" "}
+                          have submitted their ratings.
                         </p>
                         <p className="text-sm mt-2">
-                          {lbLoading ? "Refreshing…" : (
+                          {lbLoading ? (
+                            "Refreshing…"
+                          ) : (
                             <>
-                              <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
+                              <span className="font-semibold">{ratersCount}</span>{" "}
+                              / {totalPlayers} players have submitted
                               {totalPlayers - ratersCount > 0 && (
-                                <> (<span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)</>
+                                <>
+                                  {" "}
+                                  (
+                                  <span className="font-semibold">
+                                    {totalPlayers - ratersCount}
+                                  </span>{" "}
+                                  remaining)
+                                </>
                               )}
                               .
                             </>
@@ -482,7 +536,8 @@ function LoginCard({ onLogin }: { onLogin: (name: string) => void }) {
             Continue
           </Button>
           <p className="text-xs text-muted-foreground">
-            You can submit exactly once per reset. Admin can reset to start a new round.
+            You can submit exactly once per reset. Admin can reset to start a
+            new round.
           </p>
         </form>
       </CardContent>
@@ -533,7 +588,9 @@ function RateFlow({
             {hasSubmitted ? (
               <>
                 <p className="text-center text-sm text-muted-foreground max-w-prose">
-                  You’ve already submitted your ratings for this round. Wait for the leaderboard to unlock once everyone submits, or ask the admin to reset for a new round.
+                  You’ve already submitted your ratings for this round. Wait for
+                  the leaderboard to unlock once everyone submits, or ask the
+                  admin to reset for a new round.
                 </p>
                 <Button size="lg" disabled>
                   Start Rating
@@ -542,7 +599,9 @@ function RateFlow({
             ) : (
               <>
                 <p className="text-center text-sm text-muted-foreground max-w-prose">
-                  You'll be shown each teammate (except yourself) one by one. Slide to rate from 1 (lowest) to 10 (highest). You can only submit once per round.
+                  You'll be shown each teammate (except yourself) one by one.
+                  Slide to rate from 1 (lowest) to 10 (highest). You can only
+                  submit once per round.
                 </p>
                 <Button size="lg" onClick={onStart} disabled={checking}>
                   {checking ? "Checking your status..." : "Start Rating"}
@@ -577,7 +636,8 @@ function RateFlow({
                   <Separator />
                   <div className="grid gap-4">
                     <Label htmlFor="slider">
-                      Rating: <span className="font-semibold">{currentScore}</span>
+                      Rating:{" "}
+                      <span className="font-semibold">{currentScore}</span>
                     </Label>
                     <Slider
                       id="slider"
@@ -610,7 +670,8 @@ function RateFlow({
             <div className="text-center">
               <h3 className="text-xl font-semibold">All set!</h3>
               <p className="text-sm text-muted-foreground">
-                Your ratings were saved. You can't submit again until the admin resets the round.
+                Your ratings were saved. You can't submit again until the admin
+                resets the round.
               </p>
             </div>
           </div>
@@ -620,8 +681,47 @@ function RateFlow({
   );
 }
 
-/* -------------------- Leaderboard -------------------- */
+/* -------------------- Leaderboard (flashy) -------------------- */
+
 function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
+  // container/child variants for staggered entrance
+  const container: Variants = {
+    hidden: {},
+    show: {
+      transition: {
+        staggerChildren: 0.085,
+        delayChildren: 0.15,
+      },
+    },
+  };
+
+  const item: Variants = {
+    hidden: {
+      opacity: 0,
+      y: 24,
+      scale: 0.92,
+    },
+    show: {
+      opacity: 1,
+      y: 0,
+      scale: 1,
+      transition: {
+        type: "spring",
+        stiffness: 520,
+        damping: 28,
+      },
+    },
+  };
+
+  const topPulse: Variants = {
+    hidden: { scale: 0.9, opacity: 0 },
+    show: {
+      scale: [0.9, 1.15, 1],
+      opacity: 1,
+      transition: { duration: 0.6, ease: "easeOut", times: [0, 0.7, 1] },
+    },
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -633,36 +733,67 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">No ratings yet.</p>
         ) : (
-          <div className="grid gap-3">
+          <motion.div
+            variants={container}
+            initial="hidden"
+            animate="show"
+            className="grid gap-3"
+          >
             {rows.map((r, idx) => (
-              <div
+              <motion.div
                 key={r.player}
-                className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 p-3 rounded-2xl bg-card/60 border"
+                variants={item}
+                whileHover={{ y: -2, scale: 1.01 }}
+                className="relative overflow-hidden grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 p-3 rounded-2xl bg-card/60 border"
               >
-                <div className="w-8 text-center text-muted-foreground font-semibold">
+                {/* subtle shine sweep */}
+                <motion.div
+                  aria-hidden
+                  initial={{ x: "-120%" }}
+                  animate={{ x: ["-120%", "120%"] }}
+                  transition={{
+                    duration: 1.2,
+                    delay: 0.08 * idx + 0.25,
+                    ease: "easeOut",
+                  }}
+                  className="pointer-events-none absolute inset-y-0 -left-1 w-1/3 rotate-6 bg-gradient-to-r from-transparent via-white/6 to-transparent"
+                />
+
+                {/* rank bubble with pulse for top 3 */}
+                <motion.div
+                  variants={idx < 3 ? topPulse : undefined}
+                  className={`w-8 text-center font-semibold ${
+                    idx < 3 ? "text-primary" : "text-muted-foreground"
+                  }`}
+                >
                   {idx + 1}
-                </div>
+                </motion.div>
+
                 <div className="flex items-center gap-3">
                   <Avatar name={r.player} size={40} />
                   <div className="font-medium">{r.player}</div>
                 </div>
+
                 <div className="text-sm text-muted-foreground">
                   {r.ratings} ratings
                 </div>
+
                 <div className="text-lg font-semibold tabular-nums">
                   {r.average ? r.average.toFixed(2) : "–"}
                 </div>
-              </div>
+              </motion.div>
             ))}
+
             <div className="text-xs text-muted-foreground mt-2">
               Averages are calculated across all submitted ratings.
             </div>
-          </div>
+          </motion.div>
         )}
       </CardContent>
     </Card>
   );
 }
+
 
 /* -------------------- Footer -------------------- */
 function Footer() {
