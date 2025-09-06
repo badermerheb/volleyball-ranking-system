@@ -1,3 +1,4 @@
+// src/App.tsx
 import React, { useState, useEffect } from "react";
 import { Toaster, toast } from "sonner";
 import { motion, AnimatePresence, type Variants } from "framer-motion";
@@ -9,12 +10,34 @@ import { Slider } from "./components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Separator } from "./components/ui/separator";
 import { Badge } from "./components/ui/badge";
-import { ShieldCheck, LogOut, Trophy, RefreshCcw, BarChart3, Trash2, UserPlus } from "lucide-react";
+import { ShieldCheck, LogOut, Trophy, RefreshCcw, BarChart3 } from "lucide-react";
 
 /* -------------------- Config -------------------- */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
 const LS_USER_KEY = "vb_current_user";
-const LS_PASS_KEY = "vb_pass";
+
+/* -------------------- Domain Data -------------------- */
+const PLAYERS = [
+  "Bader",
+  "Charbel",
+  "Christian",
+  "Edmond",
+  "Edwin",
+  "Justin",
+  "Marc",
+  "Rayan",
+] as const;
+
+const PASSWORDS: Record<(typeof PLAYERS)[number], string> = {
+  Bader: "Ghoul23",
+  Charbel: "0.2kd",
+  Christian: "b4ss0",
+  Edmond: "123eddy123",
+  Edwin: "guzwin1",
+  Justin: "jbcbobj",
+  Marc: "mezapromax",
+  Rayan: "nurumassage",
+};
 
 /* -------------------- Types -------------------- */
 interface RatingEntry {
@@ -35,7 +58,6 @@ type LbResp = {
   total: number;
   rows: LeaderboardRow[];
 };
-type PlayersResp = { ok: boolean; players: string[] };
 
 /* -------------------- API helpers -------------------- */
 async function apiGet<T>(path: string) {
@@ -46,7 +68,7 @@ async function apiGet<T>(path: string) {
 async function apiSend<T>(
   path: string,
   body: any,
-  method: "POST" | "PATCH" | "DELETE" = "POST"
+  method: "POST" | "PATCH" = "POST"
 ) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -61,14 +83,6 @@ async function apiSend<T>(
     throw new Error(msg || `${res.status} ${res.statusText}`);
   }
   return (await res.json()) as T;
-}
-
-async function fetchPlayers(): Promise<string[]> {
-  const data = await apiGet<PlayersResp>("/players");
-  return data.players ?? [];
-}
-async function login(name: string, password: string) {
-  return apiSend<{ ok: boolean }>("/login", { name, password });
 }
 async function fetchLeaderboard(): Promise<{
   ready: boolean;
@@ -92,45 +106,44 @@ async function fetchMine(name: string): Promise<RatingEntry[]> {
 }
 async function submitRun(
   name: string,
-  password: string,
   entries: { ratee: string; score: number }[]
 ) {
   return apiSend<{ ok: boolean }>("/submit", {
     name,
-    password,
+    password: PASSWORDS[name as keyof typeof PASSWORDS],
     entries,
   });
 }
-async function adminReset(name: string, password: string) {
+async function adminReset(name: string) {
   return apiSend<{ ok: boolean }>("/reset", {
     name,
-    password,
+    password: PASSWORDS[name as keyof typeof PASSWORDS],
   });
 }
-async function adminAddPlayer(
-  adminName: string,
-  adminPassword: string,
-  name: string,
-  password: string
-) {
-  return apiSend<{ ok: boolean }>("/admin/players", {
-    adminName,
-    adminPassword,
-    name,
-    password,
-  });
+
+/* -------------------- Small utils -------------------- */
+function normalizeName(typed: string): string | null {
+  const t = typed.trim();
+  const match = (PLAYERS as readonly string[]).find(
+    (p) => p.toLowerCase() === t.toLowerCase()
+  );
+  return match ?? null; // returns canonical casing or null
 }
-async function adminRemovePlayer(
-  adminName: string,
-  adminPassword: string,
-  name: string
-) {
-  // If your server prefers another path, adjust here.
-  return apiSend<{ ok: boolean }>("/admin/players", {
-    adminName,
-    adminPassword,
-    name,
-  }, "DELETE");
+function hashStr(str: string) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function mulberry32(a: number) {
+  return function () {
+    let t = (a += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 /* -------------------- Avatar / Dots -------------------- */
@@ -171,7 +184,6 @@ function Dots({ total, index }: { total: number; index: number }) {
 /* -------------------- Main App -------------------- */
 export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
-  const [players, setPlayers] = useState<string[]>([]);
 
   // loading state for "did this user already submit?"
   const [myLoading, setMyLoading] = useState(false);
@@ -181,11 +193,11 @@ export default function App() {
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
   const [leaderboardReady, setLeaderboardReady] = useState(false);
   const [ratersCount, setRatersCount] = useState(0);
-  const [totalPlayers, setTotalPlayers] = useState<number>(0);
+  const [totalPlayers, setTotalPlayers] = useState<number>(PLAYERS.length);
   const [lbLoading, setLbLoading] = useState(false);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<"rate" | "board" | "admin">("rate");
+  const [activeTab, setActiveTab] = useState<"rate" | "board">("rate");
 
   // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
@@ -209,24 +221,14 @@ export default function App() {
     }
   }
 
-  async function refreshPlayers() {
-    try {
-      const list = await fetchPlayers();
-      setPlayers(list);
-    } catch {
-      // ignore
-    }
-  }
-
-  // Persisted login: restore on mount + initial players/leaderboard
+  // Persisted login: restore on mount + initial leaderboard
   useEffect(() => {
-    refreshPlayers().catch(() => {});
-    refreshLeaderboard().catch(() => {});
-    const cachedUser = localStorage.getItem(LS_USER_KEY);
-    if (cachedUser) {
-      setCurrentUser(cachedUser);
+    const cached = localStorage.getItem(LS_USER_KEY);
+    if (cached && (PLAYERS as readonly string[]).includes(cached)) {
+      setCurrentUser(cached); // cached is canonical casing
       setMyLoading(true);
     }
+    refreshLeaderboard().catch(() => {});
   }, []);
 
   // When user logs in (or after refresh), pull his set + leaderboard
@@ -238,7 +240,6 @@ export default function App() {
         const [mine] = await Promise.all([fetchMine(currentUser)]);
         setMyRatings(mine);
         await refreshLeaderboard();
-        await refreshPlayers();
       } catch {
         toast.error("Failed to load data from server.");
       } finally {
@@ -275,7 +276,7 @@ export default function App() {
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
     if (!currentUser || myLoading || hasSubmitted) return;
-    const order = players.filter((p) => p !== currentUser);
+    const order = PLAYERS.filter((p) => p !== currentUser);
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
     for (let i = order.length - 1; i > 0; i--) {
@@ -299,8 +300,7 @@ export default function App() {
       setCurrentScore(7);
     } else {
       try {
-        const pass = localStorage.getItem(LS_PASS_KEY) || "";
-        await submitRun(currentUser, pass, nextSession);
+        await submitRun(currentUser, nextSession);
         const mine = await fetchMine(currentUser);
         setMyRatings(mine);
         await refreshLeaderboard(); // ensure counts reflect this submission
@@ -320,7 +320,6 @@ export default function App() {
   function handleLogout() {
     setCurrentUser(null);
     localStorage.removeItem(LS_USER_KEY);
-    localStorage.removeItem(LS_PASS_KEY);
     setPendingOrder([]);
     setCurrentIndex(0);
     setSessionRatings([]);
@@ -334,15 +333,14 @@ export default function App() {
       return;
     }
     try {
-      const pass = localStorage.getItem(LS_PASS_KEY) || "";
-      await adminReset("Bader", pass);
+      await adminReset("Bader");
       setMyRatings([]);
       setLeaderboardRows([]);
       setLeaderboardReady(false);
       setRatersCount(0);
-      await refreshPlayers();
-      await refreshLeaderboard();
+      setTotalPlayers(PLAYERS.length);
       toast("All saved ratings cleared for everyone.");
+      if (activeTab === "board") refreshLeaderboard().catch(() => {});
     } catch {
       toast.error("Reset failed.");
     }
@@ -357,44 +355,39 @@ export default function App() {
           onReset={handleReset}
           isAdmin={currentUser === "Bader"}
         />
-
         {!currentUser ? (
           <LoginCard
-            onLogin={async (name, password) => {
-              try {
-                await login(name, password);
-                localStorage.setItem(LS_USER_KEY, name);
-                localStorage.setItem(LS_PASS_KEY, password);
-                setCurrentUser(name);
-                toast.success(`Welcome, ${name}!`);
-              } catch {
-                toast.error("Invalid credentials.");
+            onLogin={(typedName, pass) => {
+              const canonical = normalizeName(typedName);
+              if (!canonical) {
+                toast.error("Unknown player. Use one of the 8 names.");
+                return;
               }
+              // validate on client to give instant feedback
+              if (PASSWORDS[canonical as keyof typeof PASSWORDS] !== pass) {
+                toast.error("Wrong password.");
+                return;
+              }
+              // store canonical casing
+              localStorage.setItem(LS_USER_KEY, canonical);
+              setCurrentUser(canonical);
+              toast.success(`Welcome, ${canonical}!`);
             }}
           />
         ) : (
           <Tabs
             value={activeTab}
-            onValueChange={(v) =>
-              setActiveTab(v as "rate" | "board" | "admin")
-            }
+            onValueChange={(v) => setActiveTab(v as "rate" | "board")}
             className="w-full"
           >
-            <TabsList
-              className={`grid w-full ${
-                currentUser === "Bader" ? "grid-cols-3" : "grid-cols-2"
-              }`}
-            >
+            <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="rate">Rate Players</TabsTrigger>
               <TabsTrigger value="board">Leaderboard</TabsTrigger>
-              {currentUser === "Bader" && (
-                <TabsTrigger value="admin">Admin</TabsTrigger>
-              )}
             </TabsList>
 
             <TabsContent value="rate">
               <RateFlow
-                key={currentUser + players.join(",")}
+                key={currentUser}
                 currentUser={currentUser}
                 currentIndex={currentIndex}
                 currentScore={currentScore}
@@ -402,10 +395,7 @@ export default function App() {
                 onSubmitOne={submitOne}
                 pendingOrder={pendingOrder}
                 onStart={startRatingFlow}
-                hasFinished={
-                  players.length > 0 &&
-                  sessionRatings.length === players.length - 1
-                }
+                hasFinished={sessionRatings.length === PLAYERS.length - 1}
                 hasSubmitted={myRatings.length > 0}
                 checking={myLoading}
               />
@@ -470,22 +460,6 @@ export default function App() {
                 )}
               </AnimatePresence>
             </TabsContent>
-
-            {currentUser === "Bader" && (
-              <TabsContent value="admin">
-                <AdminPanel
-                  players={players}
-                  onAdded={async () => {
-                    await refreshPlayers();
-                    await refreshLeaderboard();
-                  }}
-                  onRemoved={async () => {
-                    await refreshPlayers();
-                    await refreshLeaderboard();
-                  }}
-                />
-              </TabsContent>
-            )}
           </Tabs>
         )}
         <Footer />
@@ -547,7 +521,7 @@ function Header({
 function LoginCard({
   onLogin,
 }: {
-  onLogin: (name: string, password: string) => void;
+  onLogin: (typedName: string, password: string) => void;
 }) {
   const [name, setName] = useState("");
   const [pass, setPass] = useState("");
@@ -557,10 +531,7 @@ function LoginCard({
     e.preventDefault();
     setSubmitting(true);
     try {
-      await login(name.trim(), pass);
-      onLogin(name.trim(), pass);
-    } catch {
-      toast.error("Invalid credentials.");
+      onLogin(name, pass); // normalization + checks occur in parent
     } finally {
       setSubmitting(false);
     }
@@ -597,7 +568,7 @@ function LoginCard({
             />
           </div>
           <Button type="submit" className="mt-2" disabled={submitting}>
-            {submitting ? "Logging in..." : "Continue"}
+            {submitting ? "Checking..." : "Continue"}
           </Button>
           <p className="text-xs text-muted-foreground">
             You can submit exactly once per reset. Admin can reset to start a
@@ -758,12 +729,20 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   };
 
   const item: Variants = {
-    hidden: { opacity: 0, y: 24, scale: 0.92 },
+    hidden: {
+      opacity: 0,
+      y: 24,
+      scale: 0.92,
+    },
     show: {
       opacity: 1,
       y: 0,
       scale: 1,
-      transition: { type: "spring", stiffness: 520, damping: 28 },
+      transition: {
+        type: "spring",
+        stiffness: 520,
+        damping: 28,
+      },
     },
   };
 
@@ -800,6 +779,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 whileHover={{ y: -2, scale: 1.01 }}
                 className="relative overflow-hidden grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 p-3 rounded-2xl bg-card/60 border"
               >
+                {/* subtle shine sweep */}
                 <motion.div
                   aria-hidden
                   initial={{ x: "-120%" }}
@@ -811,6 +791,8 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                   }}
                   className="pointer-events-none absolute inset-y-0 -left-1 w-1/3 rotate-6 bg-gradient-to-r from-transparent via-white/6 to-transparent"
                 />
+
+                {/* rank bubble with pulse for top 3 */}
                 <motion.div
                   variants={idx < 3 ? topPulse : undefined}
                   className={`w-8 text-center font-semibold ${
@@ -819,18 +801,22 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 >
                   {idx + 1}
                 </motion.div>
+
                 <div className="flex items-center gap-3">
                   <Avatar name={r.player} size={40} />
                   <div className="font-medium">{r.player}</div>
                 </div>
+
                 <div className="text-sm text-muted-foreground">
                   {r.ratings} ratings
                 </div>
+
                 <div className="text-lg font-semibold tabular-nums">
                   {r.average ? r.average.toFixed(2) : "–"}
                 </div>
               </motion.div>
             ))}
+
             <div className="text-xs text-muted-foreground mt-2">
               Averages are calculated across all submitted ratings.
             </div>
@@ -841,158 +827,11 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   );
 }
 
-/* -------------------- Admin Panel -------------------- */
-function AdminPanel({
-  players,
-  onAdded,
-  onRemoved,
-}: {
-  players: string[];
-  onAdded: () => void;
-  onRemoved: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [pass, setPass] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [removing, setRemoving] = useState<string | null>(null);
-
-  async function add() {
-    if (!name.trim() || !pass) return;
-    setLoading(true);
-    try {
-      const adminName = "Bader";
-      const adminPassword = localStorage.getItem(LS_PASS_KEY) || "";
-      await adminAddPlayer(adminName, adminPassword, name.trim(), pass);
-      toast.success(`Added player ${name.trim()}`);
-      setName("");
-      setPass("");
-      onAdded();
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to add player.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function remove(p: string) {
-    if (p === "Bader") {
-      toast.error("Cannot remove the admin.");
-      return;
-    }
-    setRemoving(p);
-    try {
-      const adminName = "Bader";
-      const adminPassword = localStorage.getItem(LS_PASS_KEY) || "";
-      await adminRemovePlayer(adminName, adminPassword, p);
-      toast.success(`Removed player ${p}`);
-      onRemoved();
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to remove player.");
-    } finally {
-      setRemoving(null);
-    }
-  }
-
-  return (
-    <div className="grid gap-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <UserPlus className="h-5 w-5" />
-            Add Player
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="grid gap-3">
-          <div className="grid gap-2">
-            <Label htmlFor="newName">Player Name</Label>
-            <Input
-              id="newName"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor="newPass">Password</Label>
-            <Input
-              id="newPass"
-              type="password"
-              value={pass}
-              onChange={(e) => setPass(e.target.value)}
-            />
-          </div>
-          <div className="flex gap-2">
-            <Button onClick={add} disabled={loading || !name.trim() || !pass}>
-              {loading ? "Adding..." : "Add Player"}
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Added players can immediately log in and rate in the current round.
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Current Players ({players.length})</CardTitle>
-        </CardHeader>
-        <CardContent className="grid gap-2">
-          {players.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No players yet.</p>
-          ) : (
-            players.map((p) => (
-              <div
-                key={p}
-                className="flex items-center justify-between p-3 rounded-2xl bg-card/60 border"
-              >
-                <div className="flex items-center gap-3">
-                  <Avatar name={p} size={32} />
-                  <div className="font-medium">{p}</div>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => remove(p)}
-                  disabled={removing === p}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  {removing === p ? "Removing..." : "Remove"}
-                </Button>
-              </div>
-            ))
-          )}
-          <div className="text-xs text-muted-foreground">
-            Removing a player deletes their ability to log in; their previous
-            ratings remain unless you reset the round.
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
 /* -------------------- Footer -------------------- */
 function Footer() {
   return (
     <div className="text-center text-xs text-muted-foreground py-2">
-      One-shot, unbiased team ratings. Admin can add/remove players and reset to start new rounds.
+      One-shot, unbiased team ratings. Admin can reset to start a new round.
     </div>
   );
-}
-
-/* -------------------- Tiny utilities -------------------- */
-function hashStr(str: string) {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-function mulberry32(a: number) {
-  return function () {
-    let t = (a += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
