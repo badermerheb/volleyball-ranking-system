@@ -10,14 +10,24 @@ import { Slider } from "./components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Separator } from "./components/ui/separator";
 import { Badge } from "./components/ui/badge";
-import { ShieldCheck, LogOut, Trophy, RefreshCcw, BarChart3 } from "lucide-react";
+import {
+  ShieldCheck,
+  LogOut,
+  Trophy,
+  RefreshCcw,
+  BarChart3,
+  Plus,
+  UserMinus,
+} from "lucide-react";
 
 /* -------------------- Config -------------------- */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
 const LS_USER_KEY = "vb_current_user";
 
-/* -------------------- Domain Data -------------------- */
-const PLAYERS = [
+/* -------------------- Default Players & Passwords -------------------- */
+/* These are your 8 predefined players and passwords. The server also validates.
+   The Admin tab can call /players/add and /players/remove if your server supports it. */
+const DEFAULT_PLAYERS = [
   "Bader",
   "Charbel",
   "Christian",
@@ -28,7 +38,7 @@ const PLAYERS = [
   "Rayan",
 ] as const;
 
-const PASSWORDS: Record<(typeof PLAYERS)[number], string> = {
+const PASSWORDS: Record<(typeof DEFAULT_PLAYERS)[number], string> = {
   Bader: "Ghoul23",
   Charbel: "0.2kd",
   Christian: "b4ss0",
@@ -84,6 +94,10 @@ async function apiSend<T>(
   }
   return (await res.json()) as T;
 }
+async function fetchPlayers(): Promise<string[]> {
+  const data = await apiGet<{ players: string[] }>("/players");
+  return data.players ?? [];
+}
 async function fetchLeaderboard(): Promise<{
   ready: boolean;
   raters: number;
@@ -110,7 +124,7 @@ async function submitRun(
 ) {
   return apiSend<{ ok: boolean }>("/submit", {
     name,
-    password: PASSWORDS[name as keyof typeof PASSWORDS],
+    password: PASSWORDS[name as keyof typeof PASSWORDS], // server validates too
     entries,
   });
 }
@@ -121,12 +135,27 @@ async function adminReset(name: string) {
   });
 }
 
+/* Optional admin endpoints — only work if you implement them on the server */
+async function adminAddPlayer(adminName: string, adminPass: string, newName: string, newPass: string) {
+  return apiSend<{ ok: boolean }>("/players/add", {
+    admin: adminName,
+    password: adminPass,
+    newName,
+    newPassword: newPass,
+  });
+}
+async function adminRemovePlayer(adminName: string, adminPass: string, removeName: string) {
+  return apiSend<{ ok: boolean }>("/players/remove", {
+    admin: adminName,
+    password: adminPass,
+    name: removeName,
+  });
+}
+
 /* -------------------- Small utils -------------------- */
-function normalizeName(typed: string): string | null {
+function normalizeName(typed: string, knownPlayers: string[]) {
   const t = typed.trim();
-  const match = (PLAYERS as readonly string[]).find(
-    (p) => p.toLowerCase() === t.toLowerCase()
-  );
+  const match = knownPlayers.find((p) => p.toLowerCase() === t.toLowerCase());
   return match ?? null; // returns canonical casing or null
 }
 function hashStr(str: string) {
@@ -185,6 +214,11 @@ function Dots({ total, index }: { total: number; index: number }) {
 export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
 
+  // dynamic players list (from server)
+  const [players, setPlayers] = useState<string[]>(
+    Array.from(DEFAULT_PLAYERS)
+  );
+
   // loading state for "did this user already submit?"
   const [myLoading, setMyLoading] = useState(false);
 
@@ -193,11 +227,11 @@ export default function App() {
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
   const [leaderboardReady, setLeaderboardReady] = useState(false);
   const [ratersCount, setRatersCount] = useState(0);
-  const [totalPlayers, setTotalPlayers] = useState<number>(PLAYERS.length);
+  const [totalPlayers, setTotalPlayers] = useState<number>(players.length);
   const [lbLoading, setLbLoading] = useState(false);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<"rate" | "board">("rate");
+  const [activeTab, setActiveTab] = useState<"rate" | "board" | "admin">("rate");
 
   // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
@@ -221,14 +255,36 @@ export default function App() {
     }
   }
 
-  // Persisted login: restore on mount + initial leaderboard
-  useEffect(() => {
-    const cached = localStorage.getItem(LS_USER_KEY);
-    if (cached && (PLAYERS as readonly string[]).includes(cached)) {
-      setCurrentUser(cached); // cached is canonical casing
-      setMyLoading(true);
+  async function refreshPlayers() {
+    try {
+      const list = await fetchPlayers();
+      if (Array.isArray(list) && list.length) {
+        setPlayers(list);
+      }
+    } catch {
+      // ignore; falls back to default list
     }
-    refreshLeaderboard().catch(() => {});
+  }
+
+  // Persisted login: restore on mount + initial data
+  useEffect(() => {
+    (async () => {
+      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
+      const cached = localStorage.getItem(LS_USER_KEY);
+      if (cached) {
+        // only accept cached if it's currently in the players list
+        const inList = (players as string[]).find(
+          (p) => p.toLowerCase() === cached.toLowerCase()
+        );
+        if (inList) {
+          setCurrentUser(inList); // canonical casing
+          setMyLoading(true);
+        } else {
+          localStorage.removeItem(LS_USER_KEY);
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // When user logs in (or after refresh), pull his set + leaderboard
@@ -254,8 +310,10 @@ export default function App() {
   useEffect(() => {
     if (activeTab === "board") {
       refreshLeaderboard().catch(() => {});
+    } else if (activeTab === "admin" && currentUser === "Bader") {
+      refreshPlayers().catch(() => {});
     }
-  }, [activeTab]);
+  }, [activeTab, currentUser]);
 
   useEffect(() => {
     if (activeTab !== "board" || leaderboardReady) return;
@@ -268,15 +326,17 @@ export default function App() {
   useEffect(() => {
     function onFocus() {
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
+      if (activeTab === "admin" && currentUser === "Bader")
+        refreshPlayers().catch(() => {});
     }
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [activeTab]);
+  }, [activeTab, currentUser]);
 
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
     if (!currentUser || myLoading || hasSubmitted) return;
-    const order = PLAYERS.filter((p) => p !== currentUser);
+    const order = players.filter((p) => p !== currentUser);
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
     for (let i = order.length - 1; i > 0; i--) {
@@ -325,6 +385,7 @@ export default function App() {
     setSessionRatings([]);
     setMyRatings([]);
     setMyLoading(false);
+    setActiveTab("rate");
   }
 
   async function handleReset() {
@@ -338,11 +399,43 @@ export default function App() {
       setLeaderboardRows([]);
       setLeaderboardReady(false);
       setRatersCount(0);
-      setTotalPlayers(PLAYERS.length);
+      setTotalPlayers(players.length);
       toast("All saved ratings cleared for everyone.");
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
     } catch {
       toast.error("Reset failed.");
+    }
+  }
+
+  /* ---------- Admin panel actions (require server endpoints to exist) ---------- */
+  async function handleAddPlayer(newName: string, newPass: string) {
+    try {
+      await adminAddPlayer("Bader", PASSWORDS.Bader, newName, newPass);
+      toast.success(`Added ${newName}.`);
+      await refreshPlayers();
+      await refreshLeaderboard();
+    } catch (e: any) {
+      const msg = String(e?.message ?? "");
+      if (/404|not\s*found/i.test(msg)) {
+        toast.error("Add endpoint not available on server. Implement POST /players/add.");
+      } else {
+        toast.error(msg || "Failed to add player.");
+      }
+    }
+  }
+  async function handleRemovePlayer(name: string) {
+    try {
+      await adminRemovePlayer("Bader", PASSWORDS.Bader, name);
+      toast.success(`Removed ${name}.`);
+      await refreshPlayers();
+      await refreshLeaderboard();
+    } catch (e: any) {
+      const msg = String(e?.message ?? "");
+      if (/404|not\s*found/i.test(msg)) {
+        toast.error("Remove endpoint not available on server. Implement POST /players/remove.");
+      } else {
+        toast.error(msg || "Failed to remove player.");
+      }
     }
   }
 
@@ -357,18 +450,21 @@ export default function App() {
         />
         {!currentUser ? (
           <LoginCard
+            players={players}
             onLogin={(typedName, pass) => {
-              const canonical = normalizeName(typedName);
+              const canonical = normalizeName(typedName, players);
               if (!canonical) {
-                toast.error("Unknown player. Use one of the 8 names.");
+                toast.error("Unknown player. Use one of the listed names.");
                 return;
               }
-              // validate on client to give instant feedback
-              if (PASSWORDS[canonical as keyof typeof PASSWORDS] !== pass) {
-                toast.error("Wrong password.");
-                return;
+              // Client-side quick check only for the original 8.
+              if (canonical in PASSWORDS) {
+                if (PASSWORDS[canonical as keyof typeof PASSWORDS] !== pass) {
+                  toast.error("Wrong password.");
+                  return;
+                }
               }
-              // store canonical casing
+              // Store canonical casing and proceed.
               localStorage.setItem(LS_USER_KEY, canonical);
               setCurrentUser(canonical);
               toast.success(`Welcome, ${canonical}!`);
@@ -377,12 +473,21 @@ export default function App() {
         ) : (
           <Tabs
             value={activeTab}
-            onValueChange={(v) => setActiveTab(v as "rate" | "board")}
+            onValueChange={(v) =>
+              setActiveTab(v as "rate" | "board" | "admin")
+            }
             className="w-full"
           >
-            <TabsList className="grid w-full grid-cols-2">
+            <TabsList
+              className={`grid w-full ${
+                currentUser === "Bader" ? "grid-cols-3" : "grid-cols-2"
+              }`}
+            >
               <TabsTrigger value="rate">Rate Players</TabsTrigger>
               <TabsTrigger value="board">Leaderboard</TabsTrigger>
+              {currentUser === "Bader" && (
+                <TabsTrigger value="admin">Admin</TabsTrigger>
+              )}
             </TabsList>
 
             <TabsContent value="rate">
@@ -395,7 +500,7 @@ export default function App() {
                 onSubmitOne={submitOne}
                 pendingOrder={pendingOrder}
                 onStart={startRatingFlow}
-                hasFinished={sessionRatings.length === PLAYERS.length - 1}
+                hasFinished={sessionRatings.length === players.length - 1}
                 hasSubmitted={myRatings.length > 0}
                 checking={myLoading}
               />
@@ -460,6 +565,23 @@ export default function App() {
                 )}
               </AnimatePresence>
             </TabsContent>
+
+            {currentUser === "Bader" && (
+              <TabsContent value="admin">
+                <AdminPanel
+                  players={players}
+                  raters={ratersCount}
+                  total={totalPlayers}
+                  onReset={handleReset}
+                  onRefreshAll={async () => {
+                    await Promise.all([refreshPlayers(), refreshLeaderboard()]);
+                    toast("Refreshed.");
+                  }}
+                  onAdd={handleAddPlayer}
+                  onRemove={handleRemovePlayer}
+                />
+              </TabsContent>
+            )}
           </Tabs>
         )}
         <Footer />
@@ -519,8 +641,10 @@ function Header({
 
 /* -------------------- Login -------------------- */
 function LoginCard({
+  players,
   onLogin,
 }: {
+  players: string[];
   onLogin: (typedName: string, password: string) => void;
 }) {
   const [name, setName] = useState("");
@@ -531,7 +655,8 @@ function LoginCard({
     e.preventDefault();
     setSubmitting(true);
     try {
-      onLogin(name, pass); // normalization + checks occur in parent
+      // Parent handles normalization and checks
+      onLogin(name, pass);
     } finally {
       setSubmitting(false);
     }
@@ -554,7 +679,13 @@ function LoginCard({
               value={name}
               onChange={(e) => setName(e.target.value)}
               autoComplete="username"
+              list="known-players"
             />
+            <datalist id="known-players">
+              {players.map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
           </div>
           <div className="grid gap-2">
             <Label htmlFor="pass">Password</Label>
@@ -822,6 +953,151 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
             </div>
           </motion.div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* -------------------- Admin Panel -------------------- */
+function AdminPanel({
+  players,
+  raters,
+  total,
+  onReset,
+  onRefreshAll,
+  onAdd,
+  onRemove,
+}: {
+  players: string[];
+  raters: number;
+  total: number;
+  onReset: () => void;
+  onRefreshAll: () => void;
+  onAdd: (newName: string, newPass: string) => void;
+  onRemove: (name: string) => void;
+}) {
+  const [newName, setNewName] = useState("");
+  const [newPass, setNewPass] = useState("");
+  const [removeName, setRemoveName] = useState("");
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <Trophy className="h-5 w-5" /> Admin
+          </span>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={onRefreshAll}>
+              Refresh
+            </Button>
+            <Button variant="destructive" onClick={onReset}>
+              <RefreshCcw className="h-4 w-4 mr-2" />
+              Reset Round
+            </Button>
+          </div>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-6">
+        <div className="text-sm">
+          <div>
+            Round status:{" "}
+            <span className="font-semibold">
+              {raters} / {total}
+            </span>{" "}
+            players submitted.
+          </div>
+          <div className="mt-2">
+            Current players:
+            <div className="mt-2 flex flex-wrap gap-2">
+              {players.map((p) => (
+                <span
+                  key={p}
+                  className="px-2 py-1 rounded-md border text-xs bg-card/60"
+                >
+                  {p}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        <div className="grid md:grid-cols-2 gap-6">
+          <div className="grid gap-3">
+            <div className="font-semibold flex items-center gap-2">
+              <Plus className="h-4 w-4" /> Add Player
+            </div>
+            <Label htmlFor="newName">Name</Label>
+            <Input
+              id="newName"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="New player name"
+            />
+            <Label htmlFor="newPass">Password</Label>
+            <Input
+              id="newPass"
+              value={newPass}
+              onChange={(e) => setNewPass(e.target.value)}
+              placeholder="New player password"
+            />
+            <Button
+              onClick={() => {
+                if (!newName.trim() || !newPass.trim()) {
+                  toast.error("Name and password required.");
+                  return;
+                }
+                onAdd(newName.trim(), newPass.trim());
+                setNewName("");
+                setNewPass("");
+              }}
+            >
+              Add Player
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Note: Requires server endpoints (<code>/players/add</code>) to be
+              implemented.
+            </p>
+          </div>
+
+          <div className="grid gap-3">
+            <div className="font-semibold flex items-center gap-2">
+              <UserMinus className="h-4 w-4" /> Remove Player
+            </div>
+            <Label htmlFor="removeName">Player Name</Label>
+            <Input
+              id="removeName"
+              value={removeName}
+              onChange={(e) => setRemoveName(e.target.value)}
+              placeholder="Player to remove"
+              list="players-list"
+            />
+            <datalist id="players-list">
+              {players.map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (!removeName.trim()) {
+                  toast.error("Enter a player name to remove.");
+                  return;
+                }
+                onRemove(removeName.trim());
+                setRemoveName("");
+              }}
+            >
+              Remove Player
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Note: Requires server endpoints (<code>/players/remove</code>) to
+              be implemented.
+            </p>
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
