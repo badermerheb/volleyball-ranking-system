@@ -25,8 +25,6 @@ const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
 const LS_USER_KEY = "vb_current_user";
 
 /* -------------------- Default Players & Passwords -------------------- */
-/* These are your 8 predefined players and passwords. The server also validates.
-   The Admin tab can call /players/add and /players/remove if your server supports it. */
 const DEFAULT_PLAYERS = [
   "Bader",
   "Charbel",
@@ -78,7 +76,7 @@ async function apiGet<T>(path: string) {
 async function apiSend<T>(
   path: string,
   body: any,
-  method: "POST" | "PATCH" = "POST"
+  method: "POST" | "PATCH" | "DELETE" = "POST"
 ) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -124,7 +122,7 @@ async function submitRun(
 ) {
   return apiSend<{ ok: boolean }>("/submit", {
     name,
-    password: PASSWORDS[name as keyof typeof PASSWORDS], // server validates too
+    password: PASSWORDS[name as keyof typeof PASSWORDS],
     entries,
   });
 }
@@ -135,28 +133,44 @@ async function adminReset(name: string) {
   });
 }
 
-/* Optional admin endpoints — only work if you implement them on the server */
-async function adminAddPlayer(adminName: string, adminPass: string, newName: string, newPass: string) {
-  return apiSend<{ ok: boolean }>("/players/add", {
-    admin: adminName,
-    password: adminPass,
-    newName,
-    newPassword: newPass,
+/** Admin endpoints that MATCH your server:
+ *  - ADD:    POST /admin/players   { adminName, adminPassword, name, password }
+ *  - REMOVE: DELETE /admin/players { adminName, adminPassword, name }
+ */
+async function adminAddPlayer(
+  adminName: string,
+  adminPass: string,
+  newName: string,
+  newPass: string
+) {
+  return apiSend<{ ok: boolean }>("/admin/players", {
+    adminName,
+    adminPassword: adminPass,
+    name: newName,
+    password: newPass,
   });
 }
-async function adminRemovePlayer(adminName: string, adminPass: string, removeName: string) {
-  return apiSend<{ ok: boolean }>("/players/remove", {
-    admin: adminName,
-    password: adminPass,
-    name: removeName,
-  });
+async function adminRemovePlayer(
+  adminName: string,
+  adminPass: string,
+  removeName: string
+) {
+  return apiSend<{ ok: boolean }>(
+    "/admin/players",
+    {
+      adminName,
+      adminPassword: adminPass,
+      name: removeName,
+    },
+    "DELETE"
+  );
 }
 
 /* -------------------- Small utils -------------------- */
 function normalizeName(typed: string, knownPlayers: string[]) {
   const t = typed.trim();
   const match = knownPlayers.find((p) => p.toLowerCase() === t.toLowerCase());
-  return match ?? null; // returns canonical casing or null
+  return match ?? null;
 }
 function hashStr(str: string) {
   let h = 2166136261 >>> 0;
@@ -272,12 +286,11 @@ export default function App() {
       await Promise.all([refreshPlayers(), refreshLeaderboard()]);
       const cached = localStorage.getItem(LS_USER_KEY);
       if (cached) {
-        // only accept cached if it's currently in the players list
         const inList = (players as string[]).find(
           (p) => p.toLowerCase() === cached.toLowerCase()
         );
         if (inList) {
-          setCurrentUser(inList); // canonical casing
+          setCurrentUser(inList);
           setMyLoading(true);
         } else {
           localStorage.removeItem(LS_USER_KEY);
@@ -363,7 +376,7 @@ export default function App() {
         await submitRun(currentUser, nextSession);
         const mine = await fetchMine(currentUser);
         setMyRatings(mine);
-        await refreshLeaderboard(); // ensure counts reflect this submission
+        await refreshLeaderboard();
         toast.success("Ratings submitted.");
       } catch (e: any) {
         if (String(e.message).includes("already_submitted")) {
@@ -402,40 +415,28 @@ export default function App() {
       setTotalPlayers(players.length);
       toast("All saved ratings cleared for everyone.");
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
-    } catch {
-      toast.error("Reset failed.");
+    } catch (e: any) {
+      toast.error(e?.message || "Reset failed.");
     }
   }
 
-  /* ---------- Admin panel actions (require server endpoints to exist) ---------- */
+  /* ---------- Admin panel actions (server endpoints exist) ---------- */
   async function handleAddPlayer(newName: string, newPass: string) {
     try {
       await adminAddPlayer("Bader", PASSWORDS.Bader, newName, newPass);
       toast.success(`Added ${newName}.`);
-      await refreshPlayers();
-      await refreshLeaderboard();
+      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
     } catch (e: any) {
-      const msg = String(e?.message ?? "");
-      if (/404|not\s*found/i.test(msg)) {
-        toast.error("Add endpoint not available on server. Implement POST /players/add.");
-      } else {
-        toast.error(msg || "Failed to add player.");
-      }
+      toast.error(e?.message || "Failed to add player.");
     }
   }
   async function handleRemovePlayer(name: string) {
     try {
       await adminRemovePlayer("Bader", PASSWORDS.Bader, name);
       toast.success(`Removed ${name}.`);
-      await refreshPlayers();
-      await refreshLeaderboard();
+      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
     } catch (e: any) {
-      const msg = String(e?.message ?? "");
-      if (/404|not\s*found/i.test(msg)) {
-        toast.error("Remove endpoint not available on server. Implement POST /players/remove.");
-      } else {
-        toast.error(msg || "Failed to remove player.");
-      }
+      toast.error(e?.message || "Failed to remove player.");
     }
   }
 
@@ -457,14 +458,13 @@ export default function App() {
                 toast.error("Unknown player. Use one of the listed names.");
                 return;
               }
-              // Client-side quick check only for the original 8.
+              // Client-side quick check only for the original 8 (server validates everyone).
               if (canonical in PASSWORDS) {
                 if (PASSWORDS[canonical as keyof typeof PASSWORDS] !== pass) {
                   toast.error("Wrong password.");
                   return;
                 }
               }
-              // Store canonical casing and proceed.
               localStorage.setItem(LS_USER_KEY, canonical);
               setCurrentUser(canonical);
               toast.success(`Welcome, ${canonical}!`);
@@ -655,7 +655,6 @@ function LoginCard({
     e.preventDefault();
     setSubmitting(true);
     try {
-      // Parent handles normalization and checks
       onLogin(name, pass);
     } finally {
       setSubmitting(false);
@@ -1057,8 +1056,7 @@ function AdminPanel({
               Add Player
             </Button>
             <p className="text-xs text-muted-foreground">
-              Note: Requires server endpoints (<code>/players/add</code>) to be
-              implemented.
+              Only Bader can add players.
             </p>
           </div>
 
@@ -1093,8 +1091,7 @@ function AdminPanel({
               Remove Player
             </Button>
             <p className="text-xs text-muted-foreground">
-              Note: Requires server endpoints (<code>/players/remove</code>) to
-              be implemented.
+              Only Bader can remove players.
             </p>
           </div>
         </div>

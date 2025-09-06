@@ -41,7 +41,6 @@ async function ensureSchema() {
     );
   `);
 
-  // seed initial players if none exist (keep your exact passwords)
   const { rows } = await pool.query(`SELECT COUNT(*)::int AS n FROM players`);
   if (rows[0].n === 0) {
     const seed = [
@@ -60,7 +59,10 @@ async function ensureSchema() {
       values.push(seed[i][0], seed[i][1]);
       return `($${b + 1}, $${b + 2})`;
     });
-    await pool.query(`INSERT INTO players(name, password) VALUES ${ph.join(",")}`, values);
+    await pool.query(
+      `INSERT INTO players(name, password) VALUES ${ph.join(",")}`,
+      values
+    );
   }
 }
 ensureSchema().catch((e) => {
@@ -78,7 +80,9 @@ async function checkCreds(name, password) {
   return rows.length > 0;
 }
 async function getPlayers() {
-  const { rows } = await pool.query(`SELECT name FROM players ORDER BY name ASC`);
+  const { rows } = await pool.query(
+    `SELECT name FROM players ORDER BY name ASC`
+  );
   return rows.map((r) => r.name);
 }
 
@@ -98,7 +102,9 @@ app.post("/login", async (req, res) => {
   const { name, password } = req.body || {};
   try {
     if (await checkCreds(name, password)) return res.json({ ok: true });
-    return res.status(401).json({ ok: false, error: "invalid_credentials" });
+    return res
+      .status(401)
+      .json({ ok: false, error: "invalid_credentials" });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
@@ -109,19 +115,53 @@ app.post("/login", async (req, res) => {
 app.post("/admin/players", async (req, res) => {
   const { adminName, adminPassword, name, password } = req.body || {};
   try {
-    // Auth: must be Bader with valid password
-    if (!(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))) {
+    if (
+      !(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))
+    ) {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
     if (!name || !password) {
-      return res.status(400).json({ ok: false, error: "name_and_password_required" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "name_and_password_required" });
     }
-    await pool.query(`INSERT INTO players(name, password) VALUES ($1, $2)`, [name, password]);
+    await pool.query(
+      `INSERT INTO players(name, password) VALUES ($1, $2)`,
+      [name, password]
+    );
     return res.json({ ok: true });
   } catch (e) {
     if (String(e.message).includes("duplicate key")) {
       return res.status(400).json({ ok: false, error: "player_exists" });
     }
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
+  }
+});
+
+// ADMIN: remove a player (only Bader). Also deletes that player’s ratings via FK.
+app.delete("/admin/players", async (req, res) => {
+  const { adminName, adminPassword, name } = req.body || {};
+  try {
+    if (
+      !(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))
+    ) {
+      return res.status(403).json({ ok: false, error: "admin_only" });
+    }
+    if (!name) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "name_required" });
+    }
+    const result = await pool.query(
+      `DELETE FROM players WHERE name = $1`,
+      [name]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "not_found" });
+    }
+    return res.json({ ok: true });
+  } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
   }
@@ -134,27 +174,35 @@ app.post("/submit", async (req, res) => {
     if (!(await checkCreds(name, password))) {
       return res.status(401).json({ ok: false, error: "invalid_credentials" });
     }
-    // block if already submitted once for this round
-    const check = await pool.query(`SELECT 1 FROM ratings WHERE rater = $1 LIMIT 1`, [name]);
+    const check = await pool.query(
+      `SELECT 1 FROM ratings WHERE rater = $1 LIMIT 1`,
+      [name]
+    );
     if (check.rows.length > 0) {
       return res.status(400).json({ ok: false, error: "already_submitted" });
     }
     if (!Array.isArray(entries) || entries.length === 0) {
-      return res.status(400).json({ ok: false, error: "entries_required" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "entries_required" });
     }
 
     const players = await getPlayers();
     const setPlayers = new Set(players);
     const ts = now();
 
-    // validation
     for (const e of entries) {
       const score = Number(e.score);
-      if (!setPlayers.has(e.ratee) || e.ratee === name) return res.status(400).json({ ok: false, error: "invalid_ratee" });
-      if (!Number.isFinite(score) || score < 1 || score > 10) return res.status(400).json({ ok: false, error: "invalid_score" });
+      if (!setPlayers.has(e.ratee) || e.ratee === name)
+        return res
+          .status(400)
+          .json({ ok: false, error: "invalid_ratee" });
+      if (!Number.isFinite(score) || score < 1 || score > 10)
+        return res
+          .status(400)
+          .json({ ok: false, error: "invalid_score" });
     }
 
-    // insert all
     const values = [];
     const ph = entries.map((e, i) => {
       values.push(name, e.ratee, Math.round(Number(e.score)), ts);
@@ -202,7 +250,6 @@ app.get("/leaderboard", async (_req, res) => {
     const raters = ratersRows[0].n;
     const ready = raters >= total && total > 0;
 
-    // Always compute rows (frontend decides whether to show them)
     const { rows } = await pool.query(
       `
       WITH p AS (SELECT name FROM players)
