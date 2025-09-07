@@ -110,6 +110,14 @@ async function fetchLeaderboard(): Promise<{
     rows: data.rows ?? [],
   };
 }
+async function fetchOverall(): Promise<{
+  rows: LeaderboardRow[];
+}> {
+  const data = await apiGet<{ ok: boolean; rows: LeaderboardRow[] }>(
+    "/leaderboard/overall"
+  );
+  return { rows: data.rows ?? [] };
+}
 async function fetchMine(name: string): Promise<RatingEntry[]> {
   const data = await apiGet<{ ok: boolean; ratings: RatingEntry[] }>(
     `/mine?name=${encodeURIComponent(name)}`
@@ -133,7 +141,7 @@ async function adminReset(name: string) {
   });
 }
 
-/** Admin endpoints that MATCH your server:
+/** Admin endpoints that MATCH the server:
  *  - ADD:    POST /admin/players   { adminName, adminPassword, name, password }
  *  - REMOVE: DELETE /admin/players { adminName, adminPassword, name }
  */
@@ -229,9 +237,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
 
   // dynamic players list (from server)
-  const [players, setPlayers] = useState<string[]>(
-    Array.from(DEFAULT_PLAYERS)
-  );
+  const [players, setPlayers] = useState<string[]>(Array.from(DEFAULT_PLAYERS));
 
   // loading state for "did this user already submit?"
   const [myLoading, setMyLoading] = useState(false);
@@ -244,8 +250,13 @@ export default function App() {
   const [totalPlayers, setTotalPlayers] = useState<number>(players.length);
   const [lbLoading, setLbLoading] = useState(false);
 
+  // overall board state
+  const [overallRows, setOverallRows] = useState<LeaderboardRow[]>([]);
+  const [overallLoading, setOverallLoading] = useState(false);
+
   // UI state
-  const [activeTab, setActiveTab] = useState<"rate" | "board" | "admin">("rate");
+  const [activeTab, setActiveTab] =
+    useState<"rate" | "board" | "overall" | "admin">("rate");
 
   // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
@@ -269,6 +280,16 @@ export default function App() {
     }
   }
 
+  async function refreshOverall() {
+    try {
+      setOverallLoading(true);
+      const data = await fetchOverall();
+      setOverallRows(data.rows);
+    } finally {
+      setOverallLoading(false);
+    }
+  }
+
   async function refreshPlayers() {
     try {
       const list = await fetchPlayers();
@@ -283,7 +304,7 @@ export default function App() {
   // Persisted login: restore on mount + initial data
   useEffect(() => {
     (async () => {
-      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
+      await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
       const cached = localStorage.getItem(LS_USER_KEY);
       if (cached) {
         const inList = (players as string[]).find(
@@ -308,7 +329,7 @@ export default function App() {
       try {
         const [mine] = await Promise.all([fetchMine(currentUser)]);
         setMyRatings(mine);
-        await refreshLeaderboard();
+        await Promise.all([refreshLeaderboard(), refreshOverall()]);
       } catch {
         toast.error("Failed to load data from server.");
       } finally {
@@ -323,6 +344,8 @@ export default function App() {
   useEffect(() => {
     if (activeTab === "board") {
       refreshLeaderboard().catch(() => {});
+    } else if (activeTab === "overall") {
+      refreshOverall().catch(() => {});
     } else if (activeTab === "admin" && currentUser === "Bader") {
       refreshPlayers().catch(() => {});
     }
@@ -339,6 +362,7 @@ export default function App() {
   useEffect(() => {
     function onFocus() {
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
+      if (activeTab === "overall") refreshOverall().catch(() => {});
       if (activeTab === "admin" && currentUser === "Bader")
         refreshPlayers().catch(() => {});
     }
@@ -376,7 +400,7 @@ export default function App() {
         await submitRun(currentUser, nextSession);
         const mine = await fetchMine(currentUser);
         setMyRatings(mine);
-        await refreshLeaderboard();
+        await Promise.all([refreshLeaderboard(), refreshOverall()]);
         toast.success("Ratings submitted.");
       } catch (e: any) {
         if (String(e.message).includes("already_submitted")) {
@@ -410,22 +434,24 @@ export default function App() {
       await adminReset("Bader");
       setMyRatings([]);
       setLeaderboardRows([]);
+      setOverallRows([]);
       setLeaderboardReady(false);
       setRatersCount(0);
       setTotalPlayers(players.length);
-      toast("All saved ratings cleared for everyone.");
+      toast("Round closed. New round started.");
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
+      if (activeTab === "overall") refreshOverall().catch(() => {});
     } catch (e: any) {
       toast.error(e?.message || "Reset failed.");
     }
   }
 
-  /* ---------- Admin panel actions (server endpoints exist) ---------- */
+  /* ---------- Admin panel actions ---------- */
   async function handleAddPlayer(newName: string, newPass: string) {
     try {
       await adminAddPlayer("Bader", PASSWORDS.Bader, newName, newPass);
       toast.success(`Added ${newName}.`);
-      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
+      await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to add player.");
     }
@@ -434,11 +460,14 @@ export default function App() {
     try {
       await adminRemovePlayer("Bader", PASSWORDS.Bader, name);
       toast.success(`Removed ${name}.`);
-      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
+      await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to remove player.");
     }
   }
+
+  const tabCols =
+    currentUser === "Bader" ? "grid-cols-4" : "grid-cols-3";
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/30 text-foreground p-4 md:p-10">
@@ -474,17 +503,14 @@ export default function App() {
           <Tabs
             value={activeTab}
             onValueChange={(v) =>
-              setActiveTab(v as "rate" | "board" | "admin")
+              setActiveTab(v as "rate" | "board" | "overall" | "admin")
             }
             className="w-full"
           >
-            <TabsList
-              className={`grid w-full ${
-                currentUser === "Bader" ? "grid-cols-3" : "grid-cols-2"
-              }`}
-            >
+            <TabsList className={`grid w-full ${tabCols}`}>
               <TabsTrigger value="rate">Rate Players</TabsTrigger>
               <TabsTrigger value="board">Leaderboard</TabsTrigger>
+              <TabsTrigger value="overall">Overall</TabsTrigger>
               {currentUser === "Bader" && (
                 <TabsTrigger value="admin">Admin</TabsTrigger>
               )}
@@ -566,6 +592,35 @@ export default function App() {
               </AnimatePresence>
             </TabsContent>
 
+            <TabsContent value="overall">
+              <motion.div
+                key="overall"
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -12 }}
+                transition={{ duration: 0.2 }}
+              >
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Trophy className="h-5 w-5" /> Overall Leaderboard
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {overallLoading ? (
+                      <p className="text-sm text-muted-foreground">Refreshing…</p>
+                    ) : overallRows.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">
+                        No completed matches yet.
+                      </p>
+                    ) : (
+                      <Leaderboard rows={overallRows} />
+                    )}
+                  </CardContent>
+                </Card>
+              </motion.div>
+            </TabsContent>
+
             {currentUser === "Bader" && (
               <TabsContent value="admin">
                 <AdminPanel
@@ -574,7 +629,11 @@ export default function App() {
                   total={totalPlayers}
                   onReset={handleReset}
                   onRefreshAll={async () => {
-                    await Promise.all([refreshPlayers(), refreshLeaderboard()]);
+                    await Promise.all([
+                      refreshPlayers(),
+                      refreshLeaderboard(),
+                      refreshOverall(),
+                    ]);
                     toast("Refreshed.");
                   }}
                   onAdd={handleAddPlayer}
@@ -624,9 +683,9 @@ function Header({
             variant="outline"
             size="sm"
             onClick={onReset}
-            title="Clear all saved ratings for everyone"
+            title="Close current round and start a new one"
           >
-            <RefreshCcw className="h-4 w-4 mr-2" /> Reset Data
+            <RefreshCcw className="h-4 w-4 mr-2" /> Reset Round
           </Button>
         )}
         {currentUser && (
@@ -701,7 +760,7 @@ function LoginCard({
             {submitting ? "Checking..." : "Continue"}
           </Button>
           <p className="text-xs text-muted-foreground">
-            You can submit exactly once per reset. Admin can reset to start a
+            You can submit exactly once per round. Admin can reset to start a
             new round.
           </p>
         </form>
@@ -801,8 +860,7 @@ function RateFlow({
                   <Separator />
                   <div className="grid gap-4">
                     <Label htmlFor="slider">
-                      Rating:{" "}
-                      <span className="font-semibold">{currentScore}</span>
+                      Rating: <span className="font-semibold">{currentScore}</span>
                     </Label>
                     <Slider
                       id="slider"
@@ -896,12 +954,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">No ratings yet.</p>
         ) : (
-          <motion.div
-            variants={container}
-            initial="hidden"
-            animate="show"
-            className="grid gap-3"
-          >
+          <motion.div variants={container} initial="hidden" animate="show" className="grid gap-3">
             {rows.map((r, idx) => (
               <motion.div
                 key={r.player}
@@ -937,9 +990,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                   <div className="font-medium">{r.player}</div>
                 </div>
 
-                <div className="text-sm text-muted-foreground">
-                  {r.ratings} ratings
-                </div>
+                <div className="text-sm text-muted-foreground">{r.ratings} ratings</div>
 
                 <div className="text-lg font-semibold tabular-nums">
                   {r.average ? r.average.toFixed(2) : "–"}
@@ -1010,10 +1061,7 @@ function AdminPanel({
             Current players:
             <div className="mt-2 flex flex-wrap gap-2">
               {players.map((p) => (
-                <span
-                  key={p}
-                  className="px-2 py-1 rounded-md border text-xs bg-card/60"
-                >
+                <span key={p} className="px-2 py-1 rounded-md border text-xs bg-card/60">
                   {p}
                 </span>
               ))}
@@ -1055,9 +1103,7 @@ function AdminPanel({
             >
               Add Player
             </Button>
-            <p className="text-xs text-muted-foreground">
-              Only Bader can add players.
-            </p>
+            <p className="text-xs text-muted-foreground">Only Bader can add players.</p>
           </div>
 
           <div className="grid gap-3">
@@ -1090,9 +1136,7 @@ function AdminPanel({
             >
               Remove Player
             </Button>
-            <p className="text-xs text-muted-foreground">
-              Only Bader can remove players.
-            </p>
+            <p className="text-xs text-muted-foreground">Only Bader can remove players.</p>
           </div>
         </div>
       </CardContent>
