@@ -498,18 +498,18 @@ export default function App() {
           <LoginCard
             players={players}
             onLogin={async (typedName, pass) => {
-              const canonical = normalizeName(typedName, players);
-              if (!canonical) {
-                toast.error("Unknown player. Use one of the listed names.");
+              const name = typedName.trim();
+              if (!name) {
+                toast.error("Enter your name.");
                 return;
               }
               try {
-                // Ask backend to validate
-                await apiSend("/login", { name: canonical, password: pass });
-                localStorage.setItem(LS_USER_KEY, canonical);
-                setCurrentUser(canonical);
+                // Ask backend to validate — no client-side name gate
+                await apiSend("/login", { name, password: pass });
+                localStorage.setItem(LS_USER_KEY, name);
+                setCurrentUser(name);
                 setCurrentPass(pass);
-                toast.success(`Welcome, ${canonical}!`);
+                toast.success(`Welcome, ${name}!`);
               } catch (e: any) {
                 toast.error(e?.message || "Login failed.");
               }
