@@ -223,10 +223,10 @@ app.post("/login", async (req, res) => {
   const { name, password } = req.body || {};
   try {
     const { rows } = await pool.query(
-      `SELECT name FROM players WHERE LOWER(name) = LOWER($1) AND password = $2 LIMIT 1`,
+      `SELECT 1 FROM players WHERE LOWER(name) = LOWER($1) AND password = $2 LIMIT 1`,
       [name, password]
     );
-    if (rows.length) return res.json({ ok: true, name: rows[0].name });
+    if (rows.length > 0) return res.json({ ok: true });
     return res.status(401).json({ ok: false, error: "invalid_credentials" });
   } catch (e) {
     console.error(e);
@@ -276,48 +276,47 @@ app.delete("/admin/players", async (req, res) => {
   }
 });
 
-// ADMIN: include/exclude a single player (toggle can_rate)
+// ADMIN: include/exclude one player (toggle can_rate for a single name)
 app.patch("/admin/players/permission", async (req, res) => {
   try {
-    // accept body or query, trim/canonicalize
-    const payload = { ...(req.body || {}), ...(req.query || {}) };
-    const adminName = String(payload.adminName || payload.name || "").trim();
-    const adminPassword = String(payload.adminPassword || payload.password || "");
-    const rawName = String(payload.name || payload.player || "").trim();
+    // only read the correct admin fields here (do NOT fall back to "name")
+    const { adminName, adminPassword, name, can_rate } = req.body || {};
 
-    // auth (admin)
+    // auth (admin only)
     if (!(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))) {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
 
-    // coerce can_rate from string | boolean
-    let can_rate = payload.can_rate;
-    if (typeof can_rate === "string") {
-      const t = can_rate.toLowerCase().trim();
-      if (t === "true" || t === "1" || t === "yes") can_rate = true;
-      else if (t === "false" || t === "0" || t === "no") can_rate = false;
+    // coerce can_rate to a boolean (accept true/false/"true"/"false"/1/0)
+    let flag = can_rate;
+    if (typeof flag === "string") {
+      const t = flag.trim().toLowerCase();
+      if (t === "true" || t === "1" || t === "yes") flag = true;
+      else if (t === "false" || t === "0" || t === "no") flag = false;
     }
-    if (typeof can_rate !== "boolean" || !rawName) {
+    if (typeof flag !== "boolean" || !name || !name.trim()) {
       return res.status(400).json({ ok: false, error: "invalid_payload" });
     }
 
-    // case-insensitive, whitespace-safe match on name
+    // update exactly one player; case-insensitive + trim
     const result = await pool.query(
       `UPDATE players
          SET can_rate = $1
        WHERE LOWER(TRIM(name)) = LOWER(TRIM($2))`,
-      [can_rate, rawName]
+      [flag, name]
     );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ ok: false, error: "not_found" });
     }
-    return res.json({ ok: true, name: rawName, can_rate });
+
+    return res.json({ ok: true, name, can_rate: flag });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
   }
 });
+
 
 
 // ADMIN: lock/unlock for everyone (bulk set can_rate, and set match lock)
