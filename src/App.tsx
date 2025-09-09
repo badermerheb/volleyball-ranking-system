@@ -19,6 +19,7 @@ import {
   Plus,
   UserMinus,
 } from "lucide-react";
+import MoltenVolleyballLoader from "./components/MoltenVolleyballLoader";
 
 /* -------------------- Config -------------------- */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
@@ -566,18 +567,27 @@ export default function App() {
                         </p>
                         <p className="text-sm mt-2">
                           {lbLoading ? (
-                            "Refreshing…"
+                            <div className="flex items-center gap-2">
+                              <MoltenVolleyballLoader label="Refreshing…" size={22} speed={1.1} />
+                              <span>
+                                <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
+                                {totalPlayers - ratersCount > 0 && (
+                                  <>
+                                    {" "}(
+                                    <span className="font-semibold">{totalPlayers - ratersCount}</span>{" "}
+                                    remaining)
+                                  </>
+                                )}
+                                .
+                              </span>
+                            </div>
                           ) : (
                             <>
-                              <span className="font-semibold">{ratersCount}</span>{" "}
-                              / {totalPlayers} players have submitted
+                              <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
                               {totalPlayers - ratersCount > 0 && (
                                 <>
-                                  {" "}
-                                  (
-                                  <span className="font-semibold">
-                                    {totalPlayers - ratersCount}
-                                  </span>{" "}
+                                  {" "}(
+                                  <span className="font-semibold">{totalPlayers - ratersCount}</span>{" "}
                                   remaining)
                                 </>
                               )}
