@@ -49,6 +49,7 @@ type LbResp = {
   total: number;
   rows: LeaderboardRow[];
 };
+type PlayerDetail = { name: string; can_rate: boolean };
 
 /* -------------------- API helpers -------------------- */
 async function apiGet<T>(path: string) {
@@ -79,6 +80,12 @@ async function fetchPlayers(): Promise<string[]> {
   const data = await apiGet<{ players: string[] }>("/players");
   return data.players ?? [];
 }
+async function fetchPlayersDetails(): Promise<PlayerDetail[]> {
+  const data = await apiGet<{ ok: boolean; players: PlayerDetail[] }>(
+    "/players/details"
+  );
+  return data.players ?? [];
+}
 async function fetchLeaderboard(): Promise<{
   locked: boolean;
   ready: boolean;
@@ -106,6 +113,9 @@ async function fetchMine(name: string): Promise<RatingEntry[]> {
     `/mine?name=${encodeURIComponent(name)}`
   );
   return data.ratings ?? [];
+}
+async function login(name: string, password: string) {
+  return apiSend<{ ok: boolean; name: string }>("/login", { name, password });
 }
 async function submitRun(
   name: string,
@@ -227,16 +237,14 @@ function Dots({ total, index }: { total: number; index: number }) {
 /* -------------------- Main App -------------------- */
 export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
-  const [currentPass, setCurrentPass] = useState<string>(""); // memory only
+  const [currentPass, setCurrentPass] = useState<string>("");
 
-  // dynamic players list (from server)
   const [players, setPlayers] = useState<string[]>([]);
+  const [playerDetails, setPlayerDetails] = useState<PlayerDetail[]>([]);
 
-  // loading state for "did this user already submit?"
   const [myLoading, setMyLoading] = useState(false);
-
-  // server-backed state
   const [myRatings, setMyRatings] = useState<RatingEntry[]>([]);
+
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
   const [leaderboardReady, setLeaderboardReady] = useState(false);
   const [isLocked, setIsLocked] = useState(true);
@@ -244,15 +252,12 @@ export default function App() {
   const [totalPlayers, setTotalPlayers] = useState<number>(0);
   const [lbLoading, setLbLoading] = useState(false);
 
-  // overall board state
   const [overallRows, setOverallRows] = useState<LeaderboardRow[]>([]);
   const [overallLoading, setOverallLoading] = useState(false);
 
-  // UI state
   const [activeTab, setActiveTab] =
     useState<"rate" | "board" | "overall" | "admin">("rate");
 
-  // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentScore, setCurrentScore] = useState(7);
@@ -260,7 +265,6 @@ export default function App() {
     { ratee: string; score: number }[]
   >([]);
 
-  // helper: refresh leaderboard (with loading flag)
   async function refreshLeaderboard() {
     try {
       setLbLoading(true);
@@ -274,7 +278,6 @@ export default function App() {
       setLbLoading(false);
     }
   }
-
   async function refreshOverall() {
     try {
       setOverallLoading(true);
@@ -284,17 +287,19 @@ export default function App() {
       setOverallLoading(false);
     }
   }
-
   async function refreshPlayers() {
     try {
-      const list = await fetchPlayers();
-      if (Array.isArray(list)) setPlayers(list);
+      const [list, details] = await Promise.all([
+        fetchPlayers(),
+        fetchPlayersDetails(),
+      ]);
+      setPlayers(list);
+      setPlayerDetails(details);
     } catch {
       // ignore
     }
   }
 
-  // Persisted login: restore on mount + initial data
   useEffect(() => {
     (async () => {
       await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
@@ -306,13 +311,12 @@ export default function App() {
     })();
   }, []);
 
-  // When user logs in (or after refresh), pull his set + leaderboard
   useEffect(() => {
     if (!currentUser) return;
     setMyLoading(true);
     (async () => {
       try {
-        const [mine] = await Promise.all([fetchMine(currentUser)]);
+        const mine = await fetchMine(currentUser);
         setMyRatings(mine);
         await Promise.all([refreshLeaderboard(), refreshOverall()]);
       } catch {
@@ -325,7 +329,6 @@ export default function App() {
 
   const hasSubmitted = myRatings.length > 0;
 
-  /* ---------- Tab-driven refresh & polling ---------- */
   useEffect(() => {
     if (activeTab === "board") {
       refreshLeaderboard().catch(() => {});
@@ -355,7 +358,6 @@ export default function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, [activeTab, currentUser]);
 
-  /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
     if (!currentUser || myLoading || hasSubmitted || isLocked) return;
     const order = players.filter((p) => p !== currentUser);
@@ -428,18 +430,16 @@ export default function App() {
       setIsLocked(true);
       setRatersCount(0);
       toast("Round closed and locked. Use Unlock to start next round.");
-      if (activeTab === "board") refreshLeaderboard().catch(() => {});
-      if (activeTab === "overall") refreshOverall().catch(() => {});
+      await Promise.all([refreshLeaderboard(), refreshOverall(), refreshPlayers()]);
     } catch (e: any) {
       toast.error(e?.message || "Reset failed.");
     }
   }
 
-  /* ---------- Admin panel actions ---------- */
   async function handleAddPlayer(newName: string, newPass: string) {
     try {
       await adminAddPlayer("Bader", currentPass, newName, newPass);
-      toast.success(`Added ${newName}. (Permission to rate is OFF by default)`);
+      toast.success(`Added ${newName}. (Permission OFF by default)`);
       await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to add player.");
@@ -458,6 +458,7 @@ export default function App() {
     try {
       await adminSetPermission("Bader", currentPass, name, false);
       toast.success(`${name} excluded from rating.`);
+      await refreshPlayers();
       await refreshLeaderboard();
     } catch (e: any) {
       toast.error(e?.message || "Failed to exclude player.");
@@ -467,6 +468,7 @@ export default function App() {
     try {
       await adminSetPermission("Bader", currentPass, name, true);
       toast.success(`${name} included for rating.`);
+      await refreshPlayers();
       await refreshLeaderboard();
     } catch (e: any) {
       toast.error(e?.message || "Failed to include player.");
@@ -476,8 +478,8 @@ export default function App() {
     try {
       const r = await adminSetLock("Bader", currentPass, locked);
       setIsLocked(r.locked);
-      toast.success(r.locked ? "Ratings locked." : "Ratings unlocked.");
-      await refreshLeaderboard();
+      toast.success(r.locked ? "Ratings locked. All players excluded." : "Ratings unlocked. All players included.");
+      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to change lock state.");
     }
@@ -499,17 +501,14 @@ export default function App() {
             players={players}
             onLogin={async (typedName, pass) => {
               const name = typedName.trim();
-              if (!name) {
-                toast.error("Enter your name.");
-                return;
-              }
+              if (!name) return toast.error("Enter your name.");
               try {
-                // Ask backend to validate — no client-side name gate
-                await apiSend("/login", { name, password: pass });
-                localStorage.setItem(LS_USER_KEY, name);
-                setCurrentUser(name);
+                // backend is authoritative and case-insensitive
+                const { name: canonical } = await login(name, pass);
+                localStorage.setItem(LS_USER_KEY, canonical);
+                setCurrentUser(canonical);
                 setCurrentPass(pass);
-                toast.success(`Welcome, ${name}!`);
+                toast.success(`Welcome, ${canonical}!`);
               } catch (e: any) {
                 toast.error(e?.message || "Login failed.");
               }
@@ -580,11 +579,11 @@ export default function App() {
                           <p className="text-sm text-muted-foreground">
                             The leaderboard will be visible once{" "}
                             <span className="font-semibold">all eligible players</span>{" "}
-                            (can_rate) have submitted their ratings.
+                            have submitted.
                           </p>
                         ) : (
                           <p className="text-sm text-muted-foreground">
-                            Ratings are currently <span className="font-semibold">locked</span> by admin.
+                            Ratings are currently <span className="font-semibold">locked</span>.
                           </p>
                         )}
                         <p className="text-sm mt-2">
@@ -654,7 +653,7 @@ export default function App() {
             {currentUser === "Bader" && (
               <TabsContent value="admin">
                 <AdminPanel
-                  players={players}
+                  details={playerDetails}
                   raters={ratersCount}
                   total={totalPlayers}
                   locked={isLocked}
@@ -795,7 +794,7 @@ function LoginCard({
             {submitting ? "Checking..." : "Continue"}
           </Button>
           <p className="text-xs text-muted-foreground">
-            You can submit exactly once per unlocked round. Admin can lock/unlock and reset.
+            Usernames are not case sensitive. Passwords are.
           </p>
         </form>
       </CardContent>
@@ -938,7 +937,7 @@ function RateFlow({
   );
 }
 
-/* -------------------- Leaderboard (flashy) -------------------- */
+/* -------------------- Leaderboard -------------------- */
 function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   const container: Variants = {
     hidden: {},
@@ -985,7 +984,6 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 whileHover={{ y: -2, scale: 1.01 }}
                 className="relative overflow-hidden grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 p-3 rounded-2xl bg-card/60 border"
               >
-                {/* subtle shine sweep */}
                 <motion.div
                   aria-hidden
                   initial={{ x: "-120%" }}
@@ -993,8 +991,6 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                   transition={{ duration: 1.2, delay: 0.08 * idx + 0.25, ease: "easeOut" }}
                   className="pointer-events-none absolute inset-y-0 -left-1 w-1/3 rotate-6 bg-gradient-to-r from-transparent via-white/6 to-transparent"
                 />
-
-                {/* rank bubble with pulse for top 3 */}
                 <motion.div
                   variants={idx < 3 ? topPulse : undefined}
                   className={`w-8 text-center font-semibold ${
@@ -1003,20 +999,16 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 >
                   {idx + 1}
                 </motion.div>
-
                 <div className="flex items-center gap-3">
                   <Avatar name={r.player} size={40} />
                   <div className="font-medium">{r.player}</div>
                 </div>
-
                 <div className="text-sm text-muted-foreground">{r.ratings} ratings</div>
-
                 <div className="text-lg font-semibold tabular-nums">
                   {r.average ? r.average.toFixed(2) : "–"}
                 </div>
               </motion.div>
             ))}
-
             <div className="text-xs text-muted-foreground mt-2">
               Averages are calculated across all submitted ratings.
             </div>
@@ -1027,9 +1019,9 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   );
 }
 
-/* -------------------- Admin Panel -------------------- */
+/* -------------------- Admin Panel (clean) -------------------- */
 function AdminPanel({
-  players,
+  details,
   raters,
   total,
   locked,
@@ -1042,7 +1034,7 @@ function AdminPanel({
   onLock,
   onUnlock,
 }: {
-  players: string[];
+  details: PlayerDetail[];
   raters: number;
   total: number;
   locked: boolean;
@@ -1058,7 +1050,7 @@ function AdminPanel({
   const [newName, setNewName] = useState("");
   const [newPass, setNewPass] = useState("");
   const [removeName, setRemoveName] = useState("");
-  const [toggleName, setToggleName] = useState("");
+  const [picker, setPicker] = useState("");
 
   return (
     <Card>
@@ -1074,7 +1066,7 @@ function AdminPanel({
             <Button variant={!locked ? "secondary" : "outline"} onClick={onUnlock}>
               <Unlock className="h-4 w-4 mr-2" /> Unlock Rating
             </Button>
-            <Button variant="destructive" onClick={onReset} title="Lock current and create new locked match">
+            <Button variant="destructive" onClick={onReset} title="Lock current and create new locked round">
               <RefreshCcw className="h-4 w-4 mr-2" />
               Reset Round
             </Button>
@@ -1086,30 +1078,59 @@ function AdminPanel({
       </CardHeader>
 
       <CardContent className="grid gap-6">
-        <div className="text-sm">
+        {/* Match status */}
+        <div className="text-sm rounded-xl border p-3 bg-card/70">
           <div>
             Round status:{" "}
             <span className="font-semibold">
               {raters} / {total}
             </span>{" "}
-            eligible players submitted. {locked ? "Ratings are locked." : "Ratings are open."}
+            eligible players submitted.{" "}
+            <span className="font-semibold">
+              {locked ? "Ratings are locked." : "Ratings are open."}
+            </span>
           </div>
-          <div className="mt-2">
-            Current players:
-            <div className="mt-2 flex flex-wrap gap-2">
-              {players.map((p) => (
-                <span key={p} className="px-2 py-1 rounded-md border text-xs bg-card/60">
-                  {p}
-                </span>
-              ))}
-            </div>
+        </div>
+
+        {/* Quick roster with status + inline toggle */}
+        <div className="grid gap-2">
+          <div className="text-sm font-semibold">Players & Participation</div>
+          <div className="flex flex-wrap gap-2">
+            {details.map((p) => (
+              <div
+                key={p.name}
+                className="flex items-center gap-2 border rounded-full px-3 py-1 bg-card/60"
+              >
+                <span className="text-sm">{p.name}</span>
+                <Badge variant={p.can_rate ? "default" : "outline"}>
+                  {p.can_rate ? "Can rate" : "Excluded"}
+                </Badge>
+                <Button
+                  size="sm"
+                  variant={p.can_rate ? "outline" : "secondary"}
+                  onClick={() => (p.can_rate ? onExclude(p.name) : onInclude(p.name))}
+                >
+                  {p.can_rate ? (
+                    <>
+                      <Ban className="h-4 w-4 mr-1" /> Exclude
+                    </>
+                  ) : (
+                    <>
+                      <Check className="h-4 w-4 mr-1" /> Include
+                    </>
+                  )}
+                </Button>
+              </div>
+            ))}
           </div>
         </div>
 
         <Separator />
 
+        {/* Manage players */}
         <div className="grid md:grid-cols-2 gap-6">
-          <div className="grid gap-3">
+          {/* Add */}
+          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
             <div className="font-semibold flex items-center gap-2">
               <Plus className="h-4 w-4" /> Add Player
             </div>
@@ -1141,11 +1162,12 @@ function AdminPanel({
               Add Player
             </Button>
             <p className="text-xs text-muted-foreground">
-              New players are added with <span className="font-semibold">permission OFF</span>.
+              New players start with permission <span className="font-semibold">OFF</span>.
             </p>
           </div>
 
-          <div className="grid gap-3">
+          {/* Remove */}
+          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
             <div className="font-semibold flex items-center gap-2">
               <UserMinus className="h-4 w-4" /> Remove Player from Data
             </div>
@@ -1158,8 +1180,8 @@ function AdminPanel({
               list="players-list"
             />
             <datalist id="players-list">
-              {players.map((p) => (
-                <option key={p} value={p} />
+              {details.map((p) => (
+                <option key={p.name} value={p.name} />
               ))}
             </datalist>
             <Button
@@ -1181,18 +1203,17 @@ function AdminPanel({
           </div>
         </div>
 
-        <Separator />
-
+        {/* Include/Exclude quick box */}
         <div className="grid md:grid-cols-2 gap-6">
-          <div className="grid gap-3">
+          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
             <div className="font-semibold flex items-center gap-2">
-              <Ban className="h-4 w-4" /> Exclude From Match (can’t rate)
+              <Ban className="h-4 w-4" /> Exclude / Include (by name)
             </div>
-            <Label htmlFor="toggleName">Player Name</Label>
+            <Label htmlFor="picker">Player</Label>
             <Input
-              id="toggleName"
-              value={toggleName}
-              onChange={(e) => setToggleName(e.target.value)}
+              id="picker"
+              value={picker}
+              onChange={(e) => setPicker(e.target.value)}
               placeholder="Player to include/exclude"
               list="players-list"
             />
@@ -1200,8 +1221,8 @@ function AdminPanel({
               <Button
                 variant="destructive"
                 onClick={() => {
-                  if (!toggleName.trim()) return toast.error("Enter a name.");
-                  onExclude(toggleName.trim());
+                  if (!picker.trim()) return toast.error("Enter a name.");
+                  onExclude(picker.trim());
                 }}
               >
                 Exclude
@@ -1209,28 +1230,28 @@ function AdminPanel({
               <Button
                 variant="secondary"
                 onClick={() => {
-                  if (!toggleName.trim()) return toast.error("Enter a name.");
-                  onInclude(toggleName.trim());
+                  if (!picker.trim()) return toast.error("Enter a name.");
+                  onInclude(picker.trim());
                 }}
               >
                 <Check className="h-4 w-4 mr-1" /> Include
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Excluded players cannot submit. Totals count only included players.
+              Totals count only included players.
             </p>
           </div>
 
-          <div className="grid gap-3">
+          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
             <div className="font-semibold flex items-center gap-2">
-              {locked ? <Unlock className="h-4 w-4" /> : <Lock className="h-4 w-4" />} Lock/Unlock Rating
+              <Lock className="h-4 w-4" /> Lock/Unlock Rating (everyone)
             </div>
             <div className="flex gap-2">
               <Button onClick={onLock} variant="outline">
-                <Lock className="h-4 w-4 mr-2" /> Lock
+                <Lock className="h-4 w-4 mr-2" /> Lock (exclude all)
               </Button>
               <Button onClick={onUnlock} variant="outline">
-                <Unlock className="h-4 w-4 mr-2" /> Unlock
+                <Unlock className="h-4 w-4 mr-2" /> Unlock (include all)
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
