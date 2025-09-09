@@ -23,12 +23,19 @@ const now = () => Date.now();
 
 /* -------------------- bootstrap schema + seed -------------------- */
 async function ensureSchema() {
-  // players
+  // players (+ can_rate)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS players (
       name TEXT PRIMARY KEY,
-      password TEXT NOT NULL
+      password TEXT NOT NULL,
+      can_rate BOOLEAN NOT NULL DEFAULT FALSE
     );
+  `);
+
+  // Add column in case table already existed
+  await pool.query(`
+    ALTER TABLE players
+      ADD COLUMN IF NOT EXISTS can_rate BOOLEAN NOT NULL DEFAULT FALSE;
   `);
 
   // matches (each "round")
@@ -36,7 +43,7 @@ async function ensureSchema() {
     CREATE TABLE IF NOT EXISTS matches (
       id BIGSERIAL PRIMARY KEY,
       played_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      locked BOOLEAN NOT NULL DEFAULT FALSE
+      locked BOOLEAN NOT NULL DEFAULT TRUE  -- start locked; admin unlocks to begin
     );
   `);
 
@@ -47,15 +54,11 @@ async function ensureSchema() {
       ratee TEXT NOT NULL,
       score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 10),
       ts BIGINT NOT NULL
-      -- PK and match_id will be (re)applied below
     );
   `);
 
   // Add match_id if missing
-  await pool.query(`
-    ALTER TABLE ratings
-      ADD COLUMN IF NOT EXISTS match_id BIGINT;
-  `);
+  await pool.query(`ALTER TABLE ratings ADD COLUMN IF NOT EXISTS match_id BIGINT;`);
 
   // Ensure FKs (idempotent)
   await pool.query(`
@@ -94,7 +97,6 @@ async function ensureSchema() {
   await pool.query(`
     DO $$
     BEGIN
-      -- Drop old primary key if present
       IF EXISTS (
         SELECT 1 FROM information_schema.table_constraints
         WHERE table_name='ratings' AND constraint_type='PRIMARY KEY'
@@ -102,7 +104,6 @@ async function ensureSchema() {
         ALTER TABLE ratings DROP CONSTRAINT IF EXISTS ratings_pkey;
       END IF;
 
-      -- Create new composite primary key if missing
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.table_constraints
         WHERE table_name='ratings' AND constraint_name='ratings_match_rater_ratee_pk'
@@ -114,7 +115,7 @@ async function ensureSchema() {
     END$$;
   `);
 
-  // Seed players if empty (same as before)
+  // Seed players if empty (same as before but can_rate=false by default)
   const { rows: playerCount } = await pool.query(`SELECT COUNT(*)::int AS n FROM players`);
   if (playerCount[0].n === 0) {
     const seed = [
@@ -133,20 +134,19 @@ async function ensureSchema() {
       values.push(seed[i][0], seed[i][1]);
       return `($${b + 1}, $${b + 2})`;
     });
-    await pool.query(
-      `INSERT INTO players(name, password) VALUES ${ph.join(",")}`,
-      values
-    );
+    await pool.query(`INSERT INTO players(name, password) VALUES ${ph.join(",")}`, values);
+    // Enable rating for these seeded players by default (optional)
+    await pool.query(`UPDATE players SET can_rate = TRUE WHERE name = ANY($1)`, [
+      seed.map((s) => s[0]),
+    ]);
   }
 
-  // Ensure at least one match exists
+  // Ensure at least one match exists (start locked)
   await pool.query(`INSERT INTO matches DEFAULT VALUES ON CONFLICT DO NOTHING;`);
 
   // Backfill existing ratings to the first (oldest) match if match_id is null
   await pool.query(`
-    WITH first_match AS (
-      SELECT id FROM matches ORDER BY id ASC LIMIT 1
-    )
+    WITH first_match AS (SELECT id FROM matches ORDER BY id ASC LIMIT 1)
     UPDATE ratings
     SET match_id = (SELECT id FROM first_match)
     WHERE match_id IS NULL;
@@ -166,17 +166,25 @@ async function checkCreds(name, password) {
   );
   return rows.length > 0;
 }
-async function getPlayers() {
+async function getAllPlayers() {
   const { rows } = await pool.query(`SELECT name FROM players ORDER BY name ASC`);
   return rows.map((r) => r.name);
 }
-async function getCurrentMatchId() {
-  const { rows } = await pool.query(`SELECT id FROM matches ORDER BY id DESC LIMIT 1`);
-  return rows[0]?.id;
+async function getEligibleRaters() {
+  const { rows } = await pool.query(
+    `SELECT name FROM players WHERE can_rate = TRUE ORDER BY name ASC`
+  );
+  return rows.map((r) => r.name);
+}
+async function getCurrentMatch() {
+  const { rows } = await pool.query(
+    `SELECT id, locked FROM matches ORDER BY id DESC LIMIT 1`
+  );
+  return rows[0];
 }
 async function getTotalsForMatch(matchId) {
-  const players = await getPlayers();
-  const total = players.length;
+  const eligible = await getEligibleRaters();
+  const total = eligible.length;
   const { rows } = await pool.query(
     `SELECT COUNT(DISTINCT rater)::int AS n FROM ratings WHERE match_id = $1`,
     [matchId]
@@ -187,15 +195,30 @@ async function getTotalsForMatch(matchId) {
 /* -------------------- routes -------------------- */
 app.get("/", (_req, res) => res.json({ ok: true }));
 
+// Return players list (names only to preserve existing client shape)
 app.get("/players", async (_req, res) => {
   try {
-    res.json({ ok: true, players: await getPlayers() });
+    res.json({ ok: true, players: await getAllPlayers() });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
   }
 });
 
+// Extra: return players with can_rate (useful for admin UI)
+app.get("/players/details", async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT name, can_rate FROM players ORDER BY name ASC`
+    );
+    res.json({ ok: true, players: rows });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
+  }
+});
+
+// Login (backend-authoritative)
 app.post("/login", async (req, res) => {
   const { name, password } = req.body || {};
   try {
@@ -207,7 +230,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ADMIN: add a new player (only Bader can do this)
+// ADMIN: add a new player (default can_rate = FALSE)
 app.post("/admin/players", async (req, res) => {
   const { adminName, adminPassword, name, password } = req.body || {};
   try {
@@ -228,7 +251,7 @@ app.post("/admin/players", async (req, res) => {
   }
 });
 
-// ADMIN: remove a player (only Bader). Also deletes that player’s ratings via FK.
+// ADMIN: remove a player completely (and their ratings via FK)
 app.delete("/admin/players", async (req, res) => {
   const payload = { ...(req.body || {}), ...(req.query || {}) };
   const { adminName, adminPassword, name } = payload;
@@ -236,16 +259,13 @@ app.delete("/admin/players", async (req, res) => {
     if (!(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))) {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
-    if (!name) {
-      return res.status(400).json({ ok: false, error: "name_required" });
-    }
+    if (!name) return res.status(400).json({ ok: false, error: "name_required" });
+
     const result = await pool.query(
       `DELETE FROM players WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))`,
       [name]
     );
-    if (result.rowCount === 0) {
-      return res.status(404).json({ ok: false, error: "not_found" });
-    }
+    if (result.rowCount === 0) return res.status(404).json({ ok: false, error: "not_found" });
     return res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -253,18 +273,69 @@ app.delete("/admin/players", async (req, res) => {
   }
 });
 
-// replace entire set for rater (one-shot) within current match
+// ADMIN: include/exclude from current match (toggle can_rate)
+app.patch("/admin/players/permission", async (req, res) => {
+  const { adminName, adminPassword, name, can_rate } = req.body || {};
+  try {
+    if (!(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))) {
+      return res.status(403).json({ ok: false, error: "admin_only" });
+    }
+    if (typeof can_rate !== "boolean" || !name) {
+      return res.status(400).json({ ok: false, error: "invalid_payload" });
+    }
+    const result = await pool.query(
+      `UPDATE players SET can_rate = $1 WHERE LOWER(TRIM(name)) = LOWER(TRIM($2))`,
+      [can_rate, name]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ ok: false, error: "not_found" });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
+  }
+});
+
+// ADMIN: lock/unlock rating for ALL players (current match)
+app.post("/admin/lock", async (req, res) => {
+  const { name, password, locked } = req.body || {};
+  try {
+    if (!(name === "Bader" && (await checkCreds(name, password)))) {
+      return res.status(403).json({ ok: false, error: "admin_only" });
+    }
+    const match = await getCurrentMatch();
+    await pool.query(`UPDATE matches SET locked = $1 WHERE id = $2`, [!!locked, match.id]);
+    res.json({ ok: true, locked: !!locked });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
+  }
+});
+
+// replace entire set for rater (one-shot) within current (unlocked) match
 app.post("/submit", async (req, res) => {
   const { name, password, entries } = req.body || {};
   try {
     if (!(await checkCreds(name, password))) {
       return res.status(401).json({ ok: false, error: "invalid_credentials" });
     }
-    const matchId = await getCurrentMatchId();
+
+    // must have permission to rate
+    const { rows: perm } = await pool.query(
+      `SELECT can_rate FROM players WHERE name = $1`,
+      [name]
+    );
+    if (!perm[0]?.can_rate) {
+      return res.status(403).json({ ok: false, error: "no_permission_to_rate" });
+    }
+
+    const match = await getCurrentMatch();
+    if (match.locked) {
+      return res.status(423).json({ ok: false, error: "ratings_locked" });
+    }
 
     const check = await pool.query(
       `SELECT 1 FROM ratings WHERE match_id = $1 AND rater = $2 LIMIT 1`,
-      [matchId, name]
+      [match.id, name]
     );
     if (check.rows.length > 0) {
       return res.status(400).json({ ok: false, error: "already_submitted" });
@@ -273,7 +344,7 @@ app.post("/submit", async (req, res) => {
       return res.status(400).json({ ok: false, error: "entries_required" });
     }
 
-    const players = await getPlayers();
+    const players = await getAllPlayers(); // ratees can be anyone currently in DB
     const setPlayers = new Set(players);
     const ts = now();
 
@@ -291,7 +362,7 @@ app.post("/submit", async (req, res) => {
     const values = [];
     const ph = entries.map((e, i) => {
       const base = i * 5;
-      values.push(matchId, name, e.ratee, Math.round(Number(e.score)), ts);
+      values.push(match.id, name, e.ratee, Math.round(Number(e.score)), ts);
       return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
     });
 
@@ -310,13 +381,13 @@ app.post("/submit", async (req, res) => {
 app.get("/mine", async (req, res) => {
   const { name } = req.query;
   try {
-    const matchId = await getCurrentMatchId();
+    const match = await getCurrentMatch();
     const { rows } = await pool.query(
       `SELECT rater, ratee, score, ts AS timestamp
        FROM ratings
        WHERE match_id = $1 AND rater = $2
        ORDER BY ratee ASC`,
-      [matchId, String(name)]
+      [match.id, String(name)]
     );
     res.json({ ok: true, ratings: rows });
   } catch (e) {
@@ -325,11 +396,11 @@ app.get("/mine", async (req, res) => {
   }
 });
 
-// leaderboard for current match (locked until all players submitted)
+// leaderboard for current match (locked until all eligible players submitted)
 app.get("/leaderboard", async (_req, res) => {
   try {
-    const matchId = await getCurrentMatchId();
-    const { total, raters } = await getTotalsForMatch(matchId);
+    const match = await getCurrentMatch();
+    const { total, raters } = await getTotalsForMatch(match.id);
     const ready = raters >= total && total > 0;
 
     const { rows } = await pool.query(
@@ -346,14 +417,15 @@ app.get("/leaderboard", async (_req, res) => {
       GROUP BY p.name
       ORDER BY average DESC
       `,
-      [matchId]
+      [match.id]
     );
 
     res.json({
       ok: true,
+      locked: !!match.locked,
       ready,
       raters,
-      total,
+      total, // eligible raters only
       rows: rows.map((r) => ({
         player: r.player,
         average: Number(r.average),
@@ -371,9 +443,7 @@ app.get("/leaderboard/overall", async (_req, res) => {
   try {
     const { rows } = await pool.query(
       `
-      WITH locked_matches AS (
-        SELECT id FROM matches WHERE locked = TRUE
-      ),
+      WITH locked_matches AS (SELECT id FROM matches WHERE locked = TRUE),
       p AS (SELECT name FROM players)
       SELECT
         p.name AS player,
@@ -401,7 +471,7 @@ app.get("/leaderboard/overall", async (_req, res) => {
   }
 });
 
-// admin "reset": close current match, then start a new one (no data loss)
+// admin "reset": LOCK current match, then start a NEW locked match
 app.post("/reset", async (req, res) => {
   const { name, password } = req.body || {};
   try {
@@ -409,16 +479,17 @@ app.post("/reset", async (req, res) => {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
 
-    const matchId = await getCurrentMatchId();
-    const { total, raters } = await getTotalsForMatch(matchId);
-    const ready = raters >= total && total > 0;
+    const match = await getCurrentMatch();
 
-    // Mark closed (locked if everyone submitted)
-    await pool.query(`UPDATE matches SET locked = $1 WHERE id = $2`, [ready, matchId]);
+    // Always lock the current match (even if not everyone submitted)
+    await pool.query(`UPDATE matches SET locked = TRUE WHERE id = $1`, [match.id]);
 
-    // Start a new match for the next round
-    const { rows } = await pool.query(`INSERT INTO matches DEFAULT VALUES RETURNING id`);
-    res.json({ ok: true, closedMatch: matchId, locked: ready, newMatch: rows[0].id });
+    // Start a new (locked) match; admin must unlock explicitly
+    const { rows } = await pool.query(
+      `INSERT INTO matches (locked) VALUES (TRUE) RETURNING id`
+    );
+
+    res.json({ ok: true, closedMatch: match.id, locked: true, newMatch: rows[0].id });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
