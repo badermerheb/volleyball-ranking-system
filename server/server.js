@@ -278,25 +278,47 @@ app.delete("/admin/players", async (req, res) => {
 
 // ADMIN: include/exclude a single player (toggle can_rate)
 app.patch("/admin/players/permission", async (req, res) => {
-  const { adminName, adminPassword, name, can_rate } = req.body || {};
   try {
-    if (!(await checkCreds(adminName, adminPassword))) {
+    // accept body or query, trim/canonicalize
+    const payload = { ...(req.body || {}), ...(req.query || {}) };
+    const adminName = String(payload.adminName || payload.name || "").trim();
+    const adminPassword = String(payload.adminPassword || payload.password || "");
+    const rawName = String(payload.name || payload.player || "").trim();
+
+    // auth (admin)
+    if (!(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))) {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
-    if (typeof can_rate !== "boolean" || !name) {
+
+    // coerce can_rate from string | boolean
+    let can_rate = payload.can_rate;
+    if (typeof can_rate === "string") {
+      const t = can_rate.toLowerCase().trim();
+      if (t === "true" || t === "1" || t === "yes") can_rate = true;
+      else if (t === "false" || t === "0" || t === "no") can_rate = false;
+    }
+    if (typeof can_rate !== "boolean" || !rawName) {
       return res.status(400).json({ ok: false, error: "invalid_payload" });
     }
+
+    // case-insensitive, whitespace-safe match on name
     const result = await pool.query(
-      `UPDATE players SET can_rate = $1 WHERE LOWER(TRIM(name)) = LOWER(TRIM($2))`,
-      [can_rate, name]
+      `UPDATE players
+         SET can_rate = $1
+       WHERE LOWER(TRIM(name)) = LOWER(TRIM($2))`,
+      [can_rate, rawName]
     );
-    if (result.rowCount === 0) return res.status(404).json({ ok: false, error: "not_found" });
-    res.json({ ok: true });
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "not_found" });
+    }
+    return res.json({ ok: true, name: rawName, can_rate });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
   }
 });
+
 
 // ADMIN: lock/unlock for everyone (bulk set can_rate, and set match lock)
 app.post("/admin/lock", async (req, res) => {
