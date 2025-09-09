@@ -20,6 +20,7 @@ import {
   UserMinus,
 } from "lucide-react";
 import MoltenVolleyballLoader from "./components/MoltenVolleyballLoader";
+import VolleyballSpinner from "./components/VolleyballSpinner";
 
 /* -------------------- Config -------------------- */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
@@ -568,14 +569,13 @@ export default function App() {
                         <p className="text-sm mt-2">
                           {lbLoading ? (
                             <div className="flex items-center gap-2">
-                              <MoltenVolleyballLoader label="Refreshing…" size={22} speed={1.1} />
+                              <VolleyballSpinner size={22} label="Refreshing…" />
                               <span>
                                 <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
                                 {totalPlayers - ratersCount > 0 && (
                                   <>
                                     {" "}(
-                                    <span className="font-semibold">{totalPlayers - ratersCount}</span>{" "}
-                                    remaining)
+                                    <span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)
                                   </>
                                 )}
                                 .
@@ -587,8 +587,7 @@ export default function App() {
                               {totalPlayers - ratersCount > 0 && (
                                 <>
                                   {" "}(
-                                  <span className="font-semibold">{totalPlayers - ratersCount}</span>{" "}
-                                  remaining)
+                                  <span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)
                                 </>
                               )}
                               .
