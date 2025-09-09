@@ -223,10 +223,10 @@ app.post("/login", async (req, res) => {
   const { name, password } = req.body || {};
   try {
     const { rows } = await pool.query(
-      `SELECT 1 FROM players WHERE LOWER(name) = LOWER($1) AND password = $2 LIMIT 1`,
+      `SELECT name FROM players WHERE LOWER(name) = LOWER($1) AND password = $2 LIMIT 1`,
       [name, password]
     );
-    if (rows.length > 0) return res.json({ ok: true });
+    if (rows.length) return res.json({ ok: true, name: rows[0].name });
     return res.status(401).json({ ok: false, error: "invalid_credentials" });
   } catch (e) {
     console.error(e);
