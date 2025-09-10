@@ -1290,16 +1290,10 @@ function AdminPanel({
                   <div
                     key={p}
                     className={`flex items-center gap-2 rounded-full border bg-card/60 px-3 py-1.5 ${
-                      included ? "border-green-500/50" : "border-red-500/40"
+                      included ? "border-green-500/50" : "border-red-500/50"
                     }`}
                   >
                     <span className="text-sm font-medium">{p}</span>
-                    <Badge
-                      variant={included ? "default" : "outline"}
-                      className={`text-xxs ${included ? "" : "opacity-70"}`}
-                    >
-                      {included ? "Included" : "Excluded"}
-                    </Badge>
                     <Button
                       variant={included ? "outline" : "secondary"}
                       size="sm"
