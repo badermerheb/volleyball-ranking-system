@@ -283,8 +283,14 @@ async function togglePlayerPermission(req, res) {
     const { adminName, adminPassword, name } = req.body || {};
     let { can_rate } = req.body || {};
 
-    // admin auth
-    if (!(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))) {
+    // admin auth (treat "Bader" case-insensitively)
+    if (
+      !(
+        adminName &&
+        adminName.toString().toLowerCase() === "bader" &&
+        (await checkCreds(adminName, adminPassword))
+      )
+    ) {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
 

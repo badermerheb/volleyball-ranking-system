@@ -45,8 +45,14 @@ type LbResp = {
   ready: boolean;
   raters: number;
   total: number;
+  locked: boolean;
   rows: LeaderboardRow[];
 };
+
+interface PlayerDetail {
+  name: string;
+  can_rate: boolean;
+}
 
 /* -------------------- API helpers -------------------- */
 async function apiGet<T>(path: string) {
@@ -80,11 +86,20 @@ async function fetchPlayers(): Promise<string[]> {
   return data.players ?? [];
 }
 
+// players with can_rate
+async function fetchPlayersDetails(): Promise<PlayerDetail[]> {
+  const data = await apiGet<{ ok: boolean; players: PlayerDetail[] }>(
+    "/players/details"
+  );
+  return data.players ?? [];
+}
+
 // current-match leaderboard
 async function fetchLeaderboard(): Promise<{
   ready: boolean;
   raters: number;
   total: number;
+  locked: boolean;
   rows: LeaderboardRow[];
 }> {
   const data = await apiGet<LbResp>("/leaderboard");
@@ -92,6 +107,7 @@ async function fetchLeaderboard(): Promise<{
     ready: data.ready,
     raters: data.raters,
     total: data.total,
+    locked: data.locked,
     rows: data.rows ?? [],
   };
 }
@@ -115,8 +131,9 @@ async function fetchMine(name: string): Promise<RatingEntry[]> {
 }
 
 // login (server authoritative, case-insensitive username on server)
+// NOTE: returns canonical-cased name from server so "bader" becomes "Bader".
 async function login(name: string, password: string) {
-  return apiSend<{ ok: boolean }>("/login", { name, password });
+  return apiSend<{ ok: boolean; name: string }>("/login", { name, password });
 }
 
 // submit my run (uses stored pass)
@@ -259,6 +276,7 @@ export default function App() {
 
   // dynamic players list (from server)
   const [players, setPlayers] = useState<string[]>([]);
+  const [playersDetails, setPlayersDetails] = useState<PlayerDetail[]>([]);
 
   // loading state for "did this user already submit?"
   const [myLoading, setMyLoading] = useState(false);
@@ -270,6 +288,7 @@ export default function App() {
   const [ratersCount, setRatersCount] = useState(0);
   const [totalPlayers, setTotalPlayers] = useState<number>(0);
   const [lbLoading, setLbLoading] = useState(false);
+  const [matchLocked, setMatchLocked] = useState<boolean>(true);
 
   // overall board state
   const [overallRows, setOverallRows] = useState<LeaderboardRow[]>([]);
@@ -296,6 +315,7 @@ export default function App() {
       setLeaderboardReady(lb.ready);
       setRatersCount(lb.raters);
       setTotalPlayers(lb.total);
+      setMatchLocked(!!lb.locked);
     } finally {
       setLbLoading(false);
     }
@@ -313,8 +333,12 @@ export default function App() {
 
   async function refreshPlayers() {
     try {
-      const list = await fetchPlayers();
+      const [list, details] = await Promise.all([
+        fetchPlayers(),
+        fetchPlayersDetails(),
+      ]);
       if (Array.isArray(list)) setPlayers(list);
+      if (Array.isArray(details)) setPlayersDetails(details);
     } catch {
       // ignore; blank list shows until server responds
     }
@@ -323,11 +347,7 @@ export default function App() {
   // Persisted login: restore on mount + initial data
   useEffect(() => {
     (async () => {
-      await Promise.all([
-        refreshPlayers(),
-        refreshLeaderboard(),
-        refreshOverall(),
-      ]);
+      await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
       const cachedName = localStorage.getItem(LS_USER_KEY);
       const cachedPass = localStorage.getItem(LS_PASS_KEY);
       if (cachedName && cachedPass) {
@@ -347,7 +367,7 @@ export default function App() {
       try {
         const mine = await fetchMine(currentUser);
         setMyRatings(mine);
-        await Promise.all([refreshLeaderboard(), refreshOverall()]);
+        await Promise.all([refreshLeaderboard(), refreshOverall(), refreshPlayers()]);
       } catch {
         toast.error("Failed to load data from server.");
       } finally {
@@ -358,6 +378,12 @@ export default function App() {
 
   const hasSubmitted = myRatings.length > 0;
 
+  // Compute current user's include/exclude status
+  const currentDetail = playersDetails.find(
+    (p) => p.name.toLowerCase() === (currentUser ?? "").toLowerCase()
+  );
+  const currentUserCanRate = !!currentDetail?.can_rate;
+
   /* ---------- Tab-driven refresh & polling ---------- */
   useEffect(() => {
     if (activeTab === "board") {
@@ -366,6 +392,9 @@ export default function App() {
       refreshOverall().catch(() => {});
     } else if (activeTab === "admin" && currentUser === "Bader") {
       refreshPlayers().catch(() => {});
+    } else if (activeTab === "rate") {
+      // keep the rate tab aware of permission/lock status
+      Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
     }
   }, [activeTab, currentUser]);
 
@@ -383,6 +412,9 @@ export default function App() {
       if (activeTab === "overall") refreshOverall().catch(() => {});
       if (activeTab === "admin" && currentUser === "Bader")
         refreshPlayers().catch(() => {});
+      if (activeTab === "rate") {
+        Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
+      }
     }
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -391,6 +423,17 @@ export default function App() {
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
     if (!currentUser || myLoading || hasSubmitted) return;
+
+    // Block if excluded or if ratings are locked
+    if (matchLocked) {
+      toast.error("Ratings are currently locked. Please wait for the admin to unlock.");
+      return;
+    }
+    if (!currentUserCanRate) {
+      toast.error("You are currently excluded from rating this round.");
+      return;
+    }
+
     const order = players.filter((p) => p !== currentUser);
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
@@ -425,6 +468,10 @@ export default function App() {
           toast.error(
             "You have already submitted. Wait for admin reset to rate again."
           );
+        } else if (String(e.message).includes("no_permission_to_rate")) {
+          toast.error("You are excluded from this round and cannot submit.");
+        } else if (String(e.message).includes("ratings_locked")) {
+          toast.error("Ratings are locked. Please wait for the admin to unlock.");
         } else {
           toast.error("Failed to submit ratings.");
         }
@@ -461,6 +508,7 @@ export default function App() {
       toast("Round closed. New round started.");
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
       if (activeTab === "overall") refreshOverall().catch(() => {});
+      await refreshPlayers();
     } catch (e: any) {
       toast.error(e?.message || "Reset failed.");
     }
@@ -500,6 +548,7 @@ export default function App() {
     try {
       await adminSetPermission("Bader", currentPass, name, true);
       toast.success(`Included ${name}.`);
+      await refreshPlayers();
     } catch (e: any) {
       toast.error(e?.message || "Failed to include player.");
     }
@@ -509,6 +558,7 @@ export default function App() {
     try {
       await adminSetPermission("Bader", currentPass, name, false);
       toast.success(`Excluded ${name}.`);
+      await refreshPlayers();
     } catch (e: any) {
       toast.error(e?.message || "Failed to exclude player.");
     }
@@ -518,6 +568,7 @@ export default function App() {
     try {
       await adminLockAll("Bader", currentPass, true);
       toast("Ratings locked (all excluded).");
+      await Promise.all([refreshLeaderboard(), refreshPlayers()]);
     } catch (e: any) {
       toast.error(e?.message || "Lock failed.");
     }
@@ -527,6 +578,7 @@ export default function App() {
     try {
       await adminLockAll("Bader", currentPass, false);
       toast("Ratings unlocked (all included).");
+      await Promise.all([refreshLeaderboard(), refreshPlayers()]);
     } catch (e: any) {
       toast.error(e?.message || "Unlock failed.");
     }
@@ -542,6 +594,7 @@ export default function App() {
           onLogout={handleLogout}
           onReset={handleReset}
           isAdmin={currentUser === "Bader"}
+          locked={matchLocked}
         />
         {!currentUser ? (
           <LoginCard
@@ -553,12 +606,13 @@ export default function App() {
                 return;
               }
               try {
-                await login(name, pass); // server validates (case-insensitive username)
-                localStorage.setItem(LS_USER_KEY, name);
+                const resp = await login(name, pass); // server validates (case-insensitive username)
+                // Store & use canonical name returned by server
+                localStorage.setItem(LS_USER_KEY, resp.name);
                 localStorage.setItem(LS_PASS_KEY, pass);
-                setCurrentUser(name);
+                setCurrentUser(resp.name);
                 setCurrentPass(pass);
-                toast.success(`Welcome, ${name}!`);
+                toast.success(`Welcome, ${resp.name}!`);
               } catch (e: any) {
                 toast.error(e?.message || "Login failed.");
               }
@@ -594,6 +648,8 @@ export default function App() {
                 hasFinished={sessionRatings.length === players.length - 1}
                 hasSubmitted={myRatings.length > 0}
                 checking={myLoading}
+                canRate={currentUserCanRate}
+                locked={matchLocked}
               />
             </TabsContent>
 
@@ -621,6 +677,13 @@ export default function App() {
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2">
                           <Trophy className="h-5 w-5" /> Leaderboard (Locked)
+                          <Badge variant={matchLocked ? "destructive" : "secondary"} className="ml-2">
+                            {matchLocked ? (
+                              <span className="inline-flex items-center gap-1"><Lock className="h-3 w-3" /> Locked</span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1"><Unlock className="h-3 w-3" /> Unlocked</span>
+                            )}
+                          </Badge>
                         </CardTitle>
                       </CardHeader>
                       <CardContent>
@@ -707,8 +770,10 @@ export default function App() {
               <TabsContent value="admin">
                 <AdminPanel
                   players={players}
+                  playerDetails={playersDetails}
                   raters={ratersCount}
                   total={totalPlayers}
+                  locked={matchLocked}
                   onReset={handleReset}
                   onRefreshAll={async () => {
                     await Promise.all([
@@ -742,11 +807,13 @@ function Header({
   onLogout,
   onReset,
   isAdmin,
+  locked,
 }: {
   currentUser: string | null;
   onLogout: () => void;
   onReset: () => void;
   isAdmin: boolean;
+  locked: boolean;
 }) {
   return (
     <div className="flex items-center justify-between">
@@ -758,9 +825,22 @@ function Header({
           <h1 className="text-2xl md:text-3xl font-bold leading-tight">
             Volleyball Ranking
           </h1>
-          <p className="text-sm text-muted-foreground">
-            Secure per-player ratings • One-shot submissions
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="text-sm text-muted-foreground">
+              Secure per-player ratings • One-shot submissions
+            </p>
+            <Badge variant={locked ? "destructive" : "secondary"}>
+              {locked ? (
+                <span className="inline-flex items-center gap-1">
+                  <Lock className="h-3 w-3" /> Locked
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1">
+                  <Unlock className="h-3 w-3" /> Unlocked
+                </span>
+              )}
+            </Badge>
+          </div>
         </div>
       </div>
       <div className="flex items-center gap-2">
@@ -864,6 +944,8 @@ function RateFlow({
   hasFinished,
   hasSubmitted,
   checking,
+  canRate,
+  locked,
   onScoreChange,
   onSubmitOne,
   onStart,
@@ -875,6 +957,8 @@ function RateFlow({
   hasFinished: boolean;
   hasSubmitted: boolean;
   checking: boolean;
+  canRate: boolean;
+  locked: boolean;
   onScoreChange: (v: number) => void;
   onSubmitOne: () => void;
   onStart: () => void;
@@ -882,14 +966,35 @@ function RateFlow({
   const inProgress = pendingOrder.length > 0 && !hasFinished;
   const done = pendingOrder.length > 0 && hasFinished;
 
+  const startDisabled = checking || hasSubmitted || locked || !canRate;
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center justify-between">
           <span>Rate Players</span>
-          <Badge variant="secondary" className="text-xs">
-            Logged in as {currentUser}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="text-xs">
+              Logged in as {currentUser}
+            </Badge>
+            <Badge variant={locked ? "destructive" : "secondary"} className="text-xs">
+              {locked ? (
+                <span className="inline-flex items-center gap-1">
+                  <Lock className="h-3 w-3" /> Locked
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1">
+                  <Unlock className="h-3 w-3" /> Unlocked
+                </span>
+              )}
+            </Badge>
+            <Badge
+              variant={canRate ? "default" : "outline"}
+              className={`text-xs ${canRate ? "" : "opacity-70"}`}
+            >
+              {canRate ? "Included" : "Excluded"}
+            </Badge>
+          </div>
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -913,9 +1018,27 @@ function RateFlow({
                   Slide to rate from 1 (lowest) to 10 (highest). You can only
                   submit once per round.
                 </p>
-                <Button size="lg" onClick={onStart} disabled={checking}>
-                  {checking ? "Checking your status..." : "Start Rating"}
-                </Button>
+                <div className="grid gap-2 place-items-center">
+                  {!canRate && (
+                    <div className="text-xs text-red-500">
+                      You are excluded from this round.
+                    </div>
+                  )}
+                  {locked && (
+                    <div className="text-xs text-amber-600">
+                      Ratings are currently locked.
+                    </div>
+                  )}
+                  <Button size="lg" onClick={onStart} disabled={startDisabled}>
+                    {checking
+                      ? "Checking your status..."
+                      : !canRate
+                      ? "Excluded"
+                      : locked
+                      ? "Locked"
+                      : "Start Rating"}
+                  </Button>
+                </div>
               </>
             )}
           </div>
@@ -1077,11 +1200,13 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   );
 }
 
-/* -------------------- Admin Panel (cleaned) -------------------- */
+/* -------------------- Admin Panel (cleaned & clearer) -------------------- */
 function AdminPanel({
   players,
+  playerDetails,
   raters,
   total,
+  locked,
   onReset,
   onRefreshAll,
   onAdd,
@@ -1092,8 +1217,10 @@ function AdminPanel({
   onUnlock,
 }: {
   players: string[];
+  playerDetails: PlayerDetail[];
   raters: number;
   total: number;
+  locked: boolean;
   onReset: () => void;
   onRefreshAll: () => void;
   onAdd: (newName: string, newPass: string) => void;
@@ -1107,6 +1234,11 @@ function AdminPanel({
   const [newPass, setNewPass] = useState("");
   const [removeName, setRemoveName] = useState("");
 
+  // quick lookup for can_rate
+  const canRateMap = new Map(
+    playerDetails.map((p) => [p.name.toLowerCase(), p.can_rate])
+  );
+
   return (
     <Card>
       <CardHeader>
@@ -1114,7 +1246,18 @@ function AdminPanel({
           <span className="flex items-center gap-2">
             <Trophy className="h-5 w-5" /> Admin
           </span>
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
+            <Badge variant={locked ? "destructive" : "secondary"}>
+              {locked ? (
+                <span className="inline-flex items-center gap-1">
+                  <Lock className="h-3 w-3" /> Locked
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1">
+                  <Unlock className="h-3 w-3" /> Unlocked
+                </span>
+              )}
+            </Badge>
             <Button variant="outline" onClick={onLock} title="Exclude all">
               <Lock className="h-4 w-4 mr-2" /> Lock Rating
             </Button>
@@ -1141,30 +1284,33 @@ function AdminPanel({
           <div className="space-y-2">
             <div className="font-semibold">Players & Participation</div>
             <div className="flex flex-wrap gap-3">
-              {players.map((p) => (
-                <div
-                  key={p}
-                  className="flex items-center gap-2 rounded-full border bg-card/60 px-3 py-1.5"
-                >
-                  <span className="text-sm font-medium">{p}</span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onInclude(p)}
-                    title={`Allow ${p} to rate`}
+              {players.map((p) => {
+                const included = !!canRateMap.get(p.toLowerCase());
+                return (
+                  <div
+                    key={p}
+                    className={`flex items-center gap-2 rounded-full border bg-card/60 px-3 py-1.5 ${
+                      included ? "border-green-500/50" : "border-red-500/40"
+                    }`}
                   >
-                    Include
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onExclude(p)}
-                    title={`Exclude ${p} from rating`}
-                  >
-                    Exclude
-                  </Button>
-                </div>
-              ))}
+                    <span className="text-sm font-medium">{p}</span>
+                    <Badge
+                      variant={included ? "default" : "outline"}
+                      className={`text-xxs ${included ? "" : "opacity-70"}`}
+                    >
+                      {included ? "Included" : "Excluded"}
+                    </Badge>
+                    <Button
+                      variant={included ? "outline" : "secondary"}
+                      size="sm"
+                      onClick={() => (included ? onExclude(p) : onInclude(p))}
+                      title={included ? `Exclude ${p}` : `Include ${p}`}
+                    >
+                      {included ? "Exclude" : "Include"}
+                    </Button>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
