@@ -20,14 +20,13 @@ import {
   UserMinus,
   Lock,
   Unlock,
-  Ban,
-  Check,
 } from "lucide-react";
 import VolleyballSpinner from "./components/VolleyballSpinner";
 
 /* -------------------- Config -------------------- */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8787";
 const LS_USER_KEY = "vb_current_user";
+const LS_PASS_KEY = "vb_current_pass";
 
 /* -------------------- Types -------------------- */
 interface RatingEntry {
@@ -43,13 +42,11 @@ interface LeaderboardRow {
 }
 type LbResp = {
   ok: boolean;
-  locked: boolean;
   ready: boolean;
   raters: number;
   total: number;
   rows: LeaderboardRow[];
 };
-type PlayerDetail = { name: string; can_rate: boolean };
 
 /* -------------------- API helpers -------------------- */
 async function apiGet<T>(path: string) {
@@ -76,18 +73,15 @@ async function apiSend<T>(
   }
   return (await res.json()) as T;
 }
+
+// players (names only)
 async function fetchPlayers(): Promise<string[]> {
   const data = await apiGet<{ players: string[] }>("/players");
   return data.players ?? [];
 }
-async function fetchPlayersDetails(): Promise<PlayerDetail[]> {
-  const data = await apiGet<{ ok: boolean; players: PlayerDetail[] }>(
-    "/players/details"
-  );
-  return data.players ?? [];
-}
+
+// current-match leaderboard
 async function fetchLeaderboard(): Promise<{
-  locked: boolean;
   ready: boolean;
   raters: number;
   total: number;
@@ -95,38 +89,55 @@ async function fetchLeaderboard(): Promise<{
 }> {
   const data = await apiGet<LbResp>("/leaderboard");
   return {
-    locked: data.locked,
     ready: data.ready,
     raters: data.raters,
     total: data.total,
     rows: data.rows ?? [],
   };
 }
-async function fetchOverall(): Promise<{ rows: LeaderboardRow[] }> {
+
+// overall leaderboard (across locked matches)
+async function fetchOverall(): Promise<{
+  rows: LeaderboardRow[];
+}> {
   const data = await apiGet<{ ok: boolean; rows: LeaderboardRow[] }>(
     "/leaderboard/overall"
   );
   return { rows: data.rows ?? [] };
 }
+
+// my submitted set (current match)
 async function fetchMine(name: string): Promise<RatingEntry[]> {
   const data = await apiGet<{ ok: boolean; ratings: RatingEntry[] }>(
     `/mine?name=${encodeURIComponent(name)}`
   );
   return data.ratings ?? [];
 }
+
+// login (server authoritative, case-insensitive username on server)
 async function login(name: string, password: string) {
-  return apiSend<{ ok: boolean; name: string }>("/login", { name, password });
+  return apiSend<{ ok: boolean }>("/login", { name, password });
 }
+
+// submit my run (uses stored pass)
 async function submitRun(
   name: string,
   password: string,
   entries: { ratee: string; score: number }[]
 ) {
-  return apiSend<{ ok: boolean }>("/submit", { name, password, entries });
+  return apiSend<{ ok: boolean }>("/submit", {
+    name,
+    password,
+    entries,
+  });
 }
+
+// admin reset (close match; start new)
 async function adminReset(name: string, password: string) {
   return apiSend<{ ok: boolean }>("/reset", { name, password });
 }
+
+// admin add/remove player
 async function adminAddPlayer(
   adminName: string,
   adminPass: string,
@@ -147,11 +158,16 @@ async function adminRemovePlayer(
 ) {
   return apiSend<{ ok: boolean }>(
     "/admin/players",
-    { adminName, adminPassword: adminPass, name: removeName },
+    {
+      adminName,
+      adminPassword: adminPass,
+      name: removeName,
+    },
     "DELETE"
   );
 }
-// App.tsx
+
+// admin include/exclude ONE player
 async function adminSetPermission(
   adminName: string,
   adminPass: string,
@@ -160,12 +176,18 @@ async function adminSetPermission(
 ) {
   return apiSend<{ ok: boolean }>(
     "/admin/players/permission",
-    { adminName, adminPassword: adminPass, name: targetName, can_rate },
-    "PATCH" // <-- important
+    {
+      adminName,
+      adminPassword: adminPass,
+      name: targetName,
+      can_rate,
+    },
+    "PATCH"
   );
 }
 
-async function adminSetLock(
+// admin lock/unlock ALL
+async function adminLockAll(
   adminName: string,
   adminPass: string,
   locked: boolean
@@ -178,11 +200,6 @@ async function adminSetLock(
 }
 
 /* -------------------- Small utils -------------------- */
-function normalizeName(typed: string, knownPlayers: string[]) {
-  const t = typed.trim();
-  const match = knownPlayers.find((p) => p.toLowerCase() === t.toLowerCase());
-  return match ?? null;
-}
 function hashStr(str: string) {
   let h = 2166136261 >>> 0;
   for (let i = 0; i < str.length; i++) {
@@ -238,27 +255,31 @@ function Dots({ total, index }: { total: number; index: number }) {
 /* -------------------- Main App -------------------- */
 export default function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
-  const [currentPass, setCurrentPass] = useState<string>("");
+  const [currentPass, setCurrentPass] = useState<string | null>(null);
 
+  // dynamic players list (from server)
   const [players, setPlayers] = useState<string[]>([]);
-  const [playerDetails, setPlayerDetails] = useState<PlayerDetail[]>([]);
 
+  // loading state for "did this user already submit?"
   const [myLoading, setMyLoading] = useState(false);
-  const [myRatings, setMyRatings] = useState<RatingEntry[]>([]);
 
+  // server-backed state
+  const [myRatings, setMyRatings] = useState<RatingEntry[]>([]);
   const [leaderboardRows, setLeaderboardRows] = useState<LeaderboardRow[]>([]);
   const [leaderboardReady, setLeaderboardReady] = useState(false);
-  const [isLocked, setIsLocked] = useState(true);
   const [ratersCount, setRatersCount] = useState(0);
   const [totalPlayers, setTotalPlayers] = useState<number>(0);
   const [lbLoading, setLbLoading] = useState(false);
 
+  // overall board state
   const [overallRows, setOverallRows] = useState<LeaderboardRow[]>([]);
   const [overallLoading, setOverallLoading] = useState(false);
 
+  // UI state
   const [activeTab, setActiveTab] =
     useState<"rate" | "board" | "overall" | "admin">("rate");
 
+  // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentScore, setCurrentScore] = useState(7);
@@ -266,19 +287,20 @@ export default function App() {
     { ratee: string; score: number }[]
   >([]);
 
+  // helper: refresh leaderboard (with loading flag)
   async function refreshLeaderboard() {
     try {
       setLbLoading(true);
       const lb = await fetchLeaderboard();
       setLeaderboardRows(lb.rows);
       setLeaderboardReady(lb.ready);
-      setIsLocked(lb.locked);
       setRatersCount(lb.raters);
       setTotalPlayers(lb.total);
     } finally {
       setLbLoading(false);
     }
   }
+
   async function refreshOverall() {
     try {
       setOverallLoading(true);
@@ -288,30 +310,36 @@ export default function App() {
       setOverallLoading(false);
     }
   }
+
   async function refreshPlayers() {
     try {
-      const [list, details] = await Promise.all([
-        fetchPlayers(),
-        fetchPlayersDetails(),
-      ]);
-      setPlayers(list);
-      setPlayerDetails(details);
+      const list = await fetchPlayers();
+      if (Array.isArray(list)) setPlayers(list);
     } catch {
-      // ignore
+      // ignore; blank list shows until server responds
     }
   }
 
+  // Persisted login: restore on mount + initial data
   useEffect(() => {
     (async () => {
-      await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
-      const cached = localStorage.getItem(LS_USER_KEY);
-      if (cached) {
-        setCurrentUser(cached);
+      await Promise.all([
+        refreshPlayers(),
+        refreshLeaderboard(),
+        refreshOverall(),
+      ]);
+      const cachedName = localStorage.getItem(LS_USER_KEY);
+      const cachedPass = localStorage.getItem(LS_PASS_KEY);
+      if (cachedName && cachedPass) {
+        setCurrentUser(cachedName);
+        setCurrentPass(cachedPass);
         setMyLoading(true);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // When user logs in (or after refresh), pull his set + boards
   useEffect(() => {
     if (!currentUser) return;
     setMyLoading(true);
@@ -330,6 +358,7 @@ export default function App() {
 
   const hasSubmitted = myRatings.length > 0;
 
+  /* ---------- Tab-driven refresh & polling ---------- */
   useEffect(() => {
     if (activeTab === "board") {
       refreshLeaderboard().catch(() => {});
@@ -359,8 +388,9 @@ export default function App() {
     return () => window.removeEventListener("focus", onFocus);
   }, [activeTab, currentUser]);
 
+  /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
-    if (!currentUser || myLoading || hasSubmitted || isLocked) return;
+    if (!currentUser || myLoading || hasSubmitted) return;
     const order = players.filter((p) => p !== currentUser);
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
@@ -375,7 +405,7 @@ export default function App() {
   }
 
   async function submitOne() {
-    if (!currentUser) return;
+    if (!currentUser || !currentPass) return;
     const ratee = pendingOrder[currentIndex];
     const nextSession = [...sessionRatings, { ratee, score: currentScore }];
     setSessionRatings(nextSession);
@@ -391,13 +421,10 @@ export default function App() {
         await Promise.all([refreshLeaderboard(), refreshOverall()]);
         toast.success("Ratings submitted.");
       } catch (e: any) {
-        const msg = String(e.message || "");
-        if (msg.includes("already_submitted")) {
-          toast.error("You have already submitted for this round.");
-        } else if (msg.includes("ratings_locked")) {
-          toast.error("Ratings are currently locked by admin.");
-        } else if (msg.includes("no_permission_to_rate")) {
-          toast.error("You are excluded from rating this round.");
+        if (String(e.message).includes("already_submitted")) {
+          toast.error(
+            "You have already submitted. Wait for admin reset to rate again."
+          );
         } else {
           toast.error("Failed to submit ratings.");
         }
@@ -407,8 +434,9 @@ export default function App() {
 
   function handleLogout() {
     setCurrentUser(null);
-    setCurrentPass("");
+    setCurrentPass(null);
     localStorage.removeItem(LS_USER_KEY);
+    localStorage.removeItem(LS_PASS_KEY);
     setPendingOrder([]);
     setCurrentIndex(0);
     setSessionRatings([]);
@@ -418,7 +446,7 @@ export default function App() {
   }
 
   async function handleReset() {
-    if (currentUser !== "Bader") {
+    if (currentUser !== "Bader" || !currentPass) {
       toast.error("Only Bader (admin) can reset data.");
       return;
     }
@@ -428,61 +456,79 @@ export default function App() {
       setLeaderboardRows([]);
       setOverallRows([]);
       setLeaderboardReady(false);
-      setIsLocked(true);
       setRatersCount(0);
-      toast("Round closed and locked. Use Unlock to start next round.");
-      await Promise.all([refreshLeaderboard(), refreshOverall(), refreshPlayers()]);
+      setTotalPlayers(players.length);
+      toast("Round closed. New round started.");
+      if (activeTab === "board") refreshLeaderboard().catch(() => {});
+      if (activeTab === "overall") refreshOverall().catch(() => {});
     } catch (e: any) {
       toast.error(e?.message || "Reset failed.");
     }
   }
 
+  /* ---------- Admin actions ---------- */
   async function handleAddPlayer(newName: string, newPass: string) {
+    if (!currentPass) return;
     try {
       await adminAddPlayer("Bader", currentPass, newName, newPass);
-      toast.success(`Added ${newName}. (Permission OFF by default)`);
-      await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
+      toast.success(`Added ${newName}.`);
+      await Promise.all([
+        refreshPlayers(),
+        refreshLeaderboard(),
+        refreshOverall(),
+      ]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to add player.");
     }
   }
   async function handleRemovePlayer(name: string) {
+    if (!currentPass) return;
     try {
       await adminRemovePlayer("Bader", currentPass, name);
       toast.success(`Removed ${name}.`);
-      await Promise.all([refreshPlayers(), refreshLeaderboard(), refreshOverall()]);
+      await Promise.all([
+        refreshPlayers(),
+        refreshLeaderboard(),
+        refreshOverall(),
+      ]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to remove player.");
     }
   }
-  async function handleExclude(name: string) {
-    try {
-      await adminSetPermission("Bader", currentPass, name, false);
-      toast.success(`${name} excluded from rating.`);
-      await refreshPlayers();
-      await refreshLeaderboard();
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to exclude player.");
-    }
-  }
   async function handleInclude(name: string) {
+    if (!currentPass) return;
     try {
       await adminSetPermission("Bader", currentPass, name, true);
-      toast.success(`${name} included for rating.`);
-      await refreshPlayers();
-      await refreshLeaderboard();
+      toast.success(`Included ${name}.`);
     } catch (e: any) {
       toast.error(e?.message || "Failed to include player.");
     }
   }
-  async function handleLock(locked: boolean) {
+  async function handleExclude(name: string) {
+    if (!currentPass) return;
     try {
-      const r = await adminSetLock("Bader", currentPass, locked);
-      setIsLocked(r.locked);
-      toast.success(r.locked ? "Ratings locked. All players excluded." : "Ratings unlocked. All players included.");
-      await Promise.all([refreshPlayers(), refreshLeaderboard()]);
+      await adminSetPermission("Bader", currentPass, name, false);
+      toast.success(`Excluded ${name}.`);
     } catch (e: any) {
-      toast.error(e?.message || "Failed to change lock state.");
+      toast.error(e?.message || "Failed to exclude player.");
+    }
+  }
+  async function handleLockAll() {
+    if (!currentPass) return;
+    try {
+      await adminLockAll("Bader", currentPass, true);
+      toast("Ratings locked (all excluded).");
+    } catch (e: any) {
+      toast.error(e?.message || "Lock failed.");
+    }
+  }
+  async function handleUnlockAll() {
+    if (!currentPass) return;
+    try {
+      await adminLockAll("Bader", currentPass, false);
+      toast("Ratings unlocked (all included).");
+    } catch (e: any) {
+      toast.error(e?.message || "Unlock failed.");
     }
   }
 
@@ -502,14 +548,17 @@ export default function App() {
             players={players}
             onLogin={async (typedName, pass) => {
               const name = typedName.trim();
-              if (!name) return toast.error("Enter your name.");
+              if (!name) {
+                toast.error("Enter your name.");
+                return;
+              }
               try {
-                // backend is authoritative and case-insensitive
-                const { name: canonical } = await login(name, pass);
-                localStorage.setItem(LS_USER_KEY, canonical);
-                setCurrentUser(canonical);
+                await login(name, pass); // server validates (case-insensitive username)
+                localStorage.setItem(LS_USER_KEY, name);
+                localStorage.setItem(LS_PASS_KEY, pass);
+                setCurrentUser(name);
                 setCurrentPass(pass);
-                toast.success(`Welcome, ${canonical}!`);
+                toast.success(`Welcome, ${name}!`);
               } catch (e: any) {
                 toast.error(e?.message || "Login failed.");
               }
@@ -545,7 +594,6 @@ export default function App() {
                 hasFinished={sessionRatings.length === players.length - 1}
                 hasSubmitted={myRatings.length > 0}
                 checking={myLoading}
-                locked={isLocked}
               />
             </TabsContent>
 
@@ -576,27 +624,25 @@ export default function App() {
                         </CardTitle>
                       </CardHeader>
                       <CardContent>
-                        {!isLocked ? (
-                          <p className="text-sm text-muted-foreground">
-                            The leaderboard will be visible once{" "}
-                            <span className="font-semibold">all eligible players</span>{" "}
-                            have submitted.
-                          </p>
-                        ) : (
-                          <p className="text-sm text-muted-foreground">
-                            Ratings are currently <span className="font-semibold">locked</span>.
-                          </p>
-                        )}
+                        <p className="text-sm text-muted-foreground">
+                          The leaderboard will be visible once{" "}
+                          <span className="font-semibold">all players</span> have
+                          submitted their ratings.
+                        </p>
                         <p className="text-sm mt-2">
                           {lbLoading ? (
                             <div className="flex items-center gap-2">
                               <VolleyballSpinner size={22} label="Refreshing…" />
                               <span>
-                                <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
+                                <span className="font-semibold">{ratersCount}</span>{" "}
+                                / {totalPlayers} players have submitted
                                 {totalPlayers - ratersCount > 0 && (
                                   <>
                                     {" "}(
-                                    <span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)
+                                    <span className="font-semibold">
+                                      {totalPlayers - ratersCount}
+                                    </span>{" "}
+                                    remaining)
                                   </>
                                 )}
                                 .
@@ -604,11 +650,15 @@ export default function App() {
                             </div>
                           ) : (
                             <>
-                              <span className="font-semibold">{ratersCount}</span> / {totalPlayers} players have submitted
+                              <span className="font-semibold">{ratersCount}</span>{" "}
+                              / {totalPlayers} players have submitted
                               {totalPlayers - ratersCount > 0 && (
                                 <>
                                   {" "}(
-                                  <span className="font-semibold">{totalPlayers - ratersCount}</span> remaining)
+                                  <span className="font-semibold">
+                                    {totalPlayers - ratersCount}
+                                  </span>{" "}
+                                  remaining)
                                 </>
                               )}
                               .
@@ -638,7 +688,9 @@ export default function App() {
                   </CardHeader>
                   <CardContent>
                     {overallLoading ? (
-                      <p className="text-sm text-muted-foreground">Refreshing…</p>
+                      <p className="text-sm text-muted-foreground">
+                        Refreshing…
+                      </p>
                     ) : overallRows.length === 0 ? (
                       <p className="text-sm text-muted-foreground">
                         No completed matches yet.
@@ -654,13 +706,10 @@ export default function App() {
             {currentUser === "Bader" && (
               <TabsContent value="admin">
                 <AdminPanel
-                  details={playerDetails}
+                  players={players}
                   raters={ratersCount}
                   total={totalPlayers}
-                  locked={isLocked}
                   onReset={handleReset}
-                  onLock={() => handleLock(true)}
-                  onUnlock={() => handleLock(false)}
                   onRefreshAll={async () => {
                     await Promise.all([
                       refreshPlayers(),
@@ -671,8 +720,10 @@ export default function App() {
                   }}
                   onAdd={handleAddPlayer}
                   onRemove={handleRemovePlayer}
-                  onExclude={handleExclude}
                   onInclude={handleInclude}
+                  onExclude={handleExclude}
+                  onLock={handleLockAll}
+                  onUnlock={handleUnlockAll}
                 />
               </TabsContent>
             )}
@@ -718,7 +769,7 @@ function Header({
             variant="outline"
             size="sm"
             onClick={onReset}
-            title="Lock current round and create a new locked round"
+            title="Close current round and start a new one"
           >
             <RefreshCcw className="h-4 w-4 mr-2" /> Reset Round
           </Button>
@@ -795,7 +846,8 @@ function LoginCard({
             {submitting ? "Checking..." : "Continue"}
           </Button>
           <p className="text-xs text-muted-foreground">
-            Usernames are not case sensitive. Passwords are.
+            You can submit exactly once per round. Admin can reset to start a
+            new round.
           </p>
         </form>
       </CardContent>
@@ -812,7 +864,6 @@ function RateFlow({
   hasFinished,
   hasSubmitted,
   checking,
-  locked,
   onScoreChange,
   onSubmitOne,
   onStart,
@@ -824,7 +875,6 @@ function RateFlow({
   hasFinished: boolean;
   hasSubmitted: boolean;
   checking: boolean;
-  locked: boolean;
   onScoreChange: (v: number) => void;
   onSubmitOne: () => void;
   onStart: () => void;
@@ -848,7 +898,9 @@ function RateFlow({
             {hasSubmitted ? (
               <>
                 <p className="text-center text-sm text-muted-foreground max-w-prose">
-                  You’ve already submitted your ratings for this round.
+                  You’ve already submitted your ratings for this round. Wait for
+                  the leaderboard to unlock once everyone submits, or ask the
+                  admin to reset for a new round.
                 </p>
                 <Button size="lg" disabled>
                   Start Rating
@@ -861,8 +913,8 @@ function RateFlow({
                   Slide to rate from 1 (lowest) to 10 (highest). You can only
                   submit once per round.
                 </p>
-                <Button size="lg" onClick={onStart} disabled={checking || locked}>
-                  {checking ? "Checking your status..." : locked ? "Locked by Admin" : "Start Rating"}
+                <Button size="lg" onClick={onStart} disabled={checking}>
+                  {checking ? "Checking your status..." : "Start Rating"}
                 </Button>
               </>
             )}
@@ -928,7 +980,7 @@ function RateFlow({
               <h3 className="text-xl font-semibold">All set!</h3>
               <p className="text-sm text-muted-foreground">
                 Your ratings were saved. You can't submit again until the admin
-                resets or unlocks the next round.
+                resets the round.
               </p>
             </div>
           </div>
@@ -938,7 +990,7 @@ function RateFlow({
   );
 }
 
-/* -------------------- Leaderboard -------------------- */
+/* -------------------- Leaderboard (flashy) -------------------- */
 function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   const container: Variants = {
     hidden: {},
@@ -946,7 +998,6 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
       transition: { staggerChildren: 0.085, delayChildren: 0.15 },
     },
   };
-
   const item: Variants = {
     hidden: { opacity: 0, y: 24, scale: 0.92 },
     show: {
@@ -956,7 +1007,6 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
       transition: { type: "spring", stiffness: 520, damping: 28 },
     },
   };
-
   const topPulse: Variants = {
     hidden: { scale: 0.9, opacity: 0 },
     show: {
@@ -985,6 +1035,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 whileHover={{ y: -2, scale: 1.01 }}
                 className="relative overflow-hidden grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 p-3 rounded-2xl bg-card/60 border"
               >
+                {/* subtle shine sweep */}
                 <motion.div
                   aria-hidden
                   initial={{ x: "-120%" }}
@@ -992,6 +1043,8 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                   transition={{ duration: 1.2, delay: 0.08 * idx + 0.25, ease: "easeOut" }}
                   className="pointer-events-none absolute inset-y-0 -left-1 w-1/3 rotate-6 bg-gradient-to-r from-transparent via-white/6 to-transparent"
                 />
+
+                {/* rank bubble with pulse for top 3 */}
                 <motion.div
                   variants={idx < 3 ? topPulse : undefined}
                   className={`w-8 text-center font-semibold ${
@@ -1000,16 +1053,20 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 >
                   {idx + 1}
                 </motion.div>
+
                 <div className="flex items-center gap-3">
                   <Avatar name={r.player} size={40} />
                   <div className="font-medium">{r.player}</div>
                 </div>
+
                 <div className="text-sm text-muted-foreground">{r.ratings} ratings</div>
+
                 <div className="text-lg font-semibold tabular-nums">
                   {r.average ? r.average.toFixed(2) : "–"}
                 </div>
               </motion.div>
             ))}
+
             <div className="text-xs text-muted-foreground mt-2">
               Averages are calculated across all submitted ratings.
             </div>
@@ -1020,31 +1077,29 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   );
 }
 
-/* -------------------- Admin Panel (clean) -------------------- */
+/* -------------------- Admin Panel (cleaned) -------------------- */
 function AdminPanel({
   players,
   raters,
   total,
-  locked,
   onReset,
   onRefreshAll,
   onAdd,
   onRemove,
-  onExclude,
   onInclude,
+  onExclude,
   onLock,
   onUnlock,
 }: {
   players: string[];
   raters: number;
   total: number;
-  locked: boolean;
   onReset: () => void;
   onRefreshAll: () => void;
   onAdd: (newName: string, newPass: string) => void;
   onRemove: (name: string) => void;
-  onExclude: (name: string) => void;
   onInclude: (name: string) => void;
+  onExclude: (name: string) => void;
   onLock: () => void;
   onUnlock: () => void;
 }) {
@@ -1059,13 +1114,11 @@ function AdminPanel({
           <span className="flex items-center gap-2">
             <Trophy className="h-5 w-5" /> Admin
           </span>
-
-          {/* Top-right: ONLY lock/unlock + optional refresh */}
           <div className="flex gap-2">
-            <Button variant={locked ? "secondary" : "outline"} onClick={onLock} title="Exclude all">
+            <Button variant="outline" onClick={onLock} title="Exclude all">
               <Lock className="h-4 w-4 mr-2" /> Lock Rating
             </Button>
-            <Button variant={!locked ? "secondary" : "outline"} onClick={onUnlock} title="Include all">
+            <Button variant="outline" onClick={onUnlock} title="Include all">
               <Unlock className="h-4 w-4 mr-2" /> Unlock Rating
             </Button>
             <Button variant="outline" onClick={onRefreshAll}>Refresh</Button>
@@ -1077,8 +1130,11 @@ function AdminPanel({
         {/* Round status */}
         <div className="text-sm">
           <div className="mb-3">
-            <span className="font-semibold">{raters} / {total}</span> eligible players submitted.{" "}
-            {locked ? "Ratings are locked." : "Ratings are open."}
+            Round status:{" "}
+            <span className="font-semibold">
+              {raters} / {total}
+            </span>{" "}
+            eligible players submitted.
           </div>
 
           {/* Players & participation chips */}
@@ -1091,10 +1147,6 @@ function AdminPanel({
                   className="flex items-center gap-2 rounded-full border bg-card/60 px-3 py-1.5"
                 >
                   <span className="text-sm font-medium">{p}</span>
-                  {/* Status pill (we don’t know can_rate on client without /players/details; show neutral) */}
-                  <span className="rounded-full bg-foreground text-background text-[10px] px-2 py-0.5">
-                    Can rate
-                  </span>
                   <Button
                     variant="outline"
                     size="sm"
@@ -1195,7 +1247,7 @@ function AdminPanel({
 
         <Separator />
 
-        {/* Put Reset here so header stays clean */}
+        {/* Reset (kept out of header) */}
         <div className="flex items-center justify-between">
           <div className="text-xs text-muted-foreground">
             Reset also locks rating and starts a new locked round.
@@ -1214,7 +1266,7 @@ function AdminPanel({
 function Footer() {
   return (
     <div className="text-center text-xs text-muted-foreground py-2">
-      One-shot, unbiased team ratings. Admin can lock/unlock and reset rounds.
+      One-shot, unbiased team ratings. Admin can reset to start a new round.
     </div>
   );
 }
