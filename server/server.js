@@ -277,47 +277,47 @@ app.delete("/admin/players", async (req, res) => {
 });
 
 // ADMIN: include/exclude one player (toggle can_rate for a single name)
-app.patch("/admin/players/permission", async (req, res) => {
+// ---- shared handler (so we can mount on POST and PATCH) ----
+async function togglePlayerPermission(req, res) {
   try {
-    // only read the correct admin fields here (do NOT fall back to "name")
-    const { adminName, adminPassword, name, can_rate } = req.body || {};
+    const { adminName, adminPassword, name } = req.body || {};
+    let { can_rate } = req.body || {};
 
-    // auth (admin only)
+    // admin auth
     if (!(adminName === "Bader" && (await checkCreds(adminName, adminPassword)))) {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
 
-    // coerce can_rate to a boolean (accept true/false/"true"/"false"/1/0)
-    let flag = can_rate;
-    if (typeof flag === "string") {
-      const t = flag.trim().toLowerCase();
-      if (t === "true" || t === "1" || t === "yes") flag = true;
-      else if (t === "false" || t === "0" || t === "no") flag = false;
+    // coerce boolean
+    if (typeof can_rate === "string") {
+      const t = can_rate.trim().toLowerCase();
+      if (t === "true" || t === "1" || t === "yes") can_rate = true;
+      else if (t === "false" || t === "0" || t === "no") can_rate = false;
     }
-    if (typeof flag !== "boolean" || !name || !name.trim()) {
+    if (!name || typeof can_rate !== "boolean") {
       return res.status(400).json({ ok: false, error: "invalid_payload" });
     }
 
-    // update exactly one player; case-insensitive + trim
+    // case-insensitive, trim match
     const result = await pool.query(
       `UPDATE players
          SET can_rate = $1
        WHERE LOWER(TRIM(name)) = LOWER(TRIM($2))`,
-      [flag, name]
+      [can_rate, name]
     );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ ok: false, error: "not_found" });
     }
-
-    return res.json({ ok: true, name, can_rate: flag });
+    return res.json({ ok: true, name, can_rate });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
   }
-});
-
-
+}
+// Support BOTH PATCH and POST (client can use either)
+app.patch("/admin/players/permission", togglePlayerPermission);
+app.post("/admin/players/permission", togglePlayerPermission);
 
 // ADMIN: lock/unlock for everyone (bulk set can_rate, and set match lock)
 app.post("/admin/lock", async (req, res) => {

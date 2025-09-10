@@ -151,19 +151,20 @@ async function adminRemovePlayer(
     "DELETE"
   );
 }
+// App.tsx
 async function adminSetPermission(
   adminName: string,
   adminPass: string,
   targetName: string,
   can_rate: boolean
 ) {
-  return apiSend<{ ok: boolean }>("/admin/players/permission", {
-    adminName,
-    adminPassword: adminPass,
-    name: targetName,
-    can_rate,
-  });
+  return apiSend<{ ok: boolean }>(
+    "/admin/players/permission",
+    { adminName, adminPassword: adminPass, name: targetName, can_rate },
+    "PATCH" // <-- important
+  );
 }
+
 async function adminSetLock(
   adminName: string,
   adminPass: string,
