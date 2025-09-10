@@ -1022,7 +1022,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
 
 /* -------------------- Admin Panel (clean) -------------------- */
 function AdminPanel({
-  details,
+  players,
   raters,
   total,
   locked,
@@ -1035,7 +1035,7 @@ function AdminPanel({
   onLock,
   onUnlock,
 }: {
-  details: PlayerDetail[];
+  players: string[];
   raters: number;
   total: number;
   locked: boolean;
@@ -1051,7 +1051,6 @@ function AdminPanel({
   const [newName, setNewName] = useState("");
   const [newPass, setNewPass] = useState("");
   const [removeName, setRemoveName] = useState("");
-  const [picker, setPicker] = useState("");
 
   return (
     <Card>
@@ -1060,78 +1059,69 @@ function AdminPanel({
           <span className="flex items-center gap-2">
             <Trophy className="h-5 w-5" /> Admin
           </span>
-          <div className="flex gap-2 flex-wrap">
-            <Button variant={locked ? "secondary" : "outline"} onClick={onLock}>
+
+          {/* Top-right: ONLY lock/unlock + optional refresh */}
+          <div className="flex gap-2">
+            <Button variant={locked ? "secondary" : "outline"} onClick={onLock} title="Exclude all">
               <Lock className="h-4 w-4 mr-2" /> Lock Rating
             </Button>
-            <Button variant={!locked ? "secondary" : "outline"} onClick={onUnlock}>
+            <Button variant={!locked ? "secondary" : "outline"} onClick={onUnlock} title="Include all">
               <Unlock className="h-4 w-4 mr-2" /> Unlock Rating
             </Button>
-            <Button variant="destructive" onClick={onReset} title="Lock current and create new locked round">
-              <RefreshCcw className="h-4 w-4 mr-2" />
-              Reset Round
-            </Button>
-            <Button variant="outline" onClick={onRefreshAll}>
-              Refresh
-            </Button>
+            <Button variant="outline" onClick={onRefreshAll}>Refresh</Button>
           </div>
         </CardTitle>
       </CardHeader>
 
       <CardContent className="grid gap-6">
-        {/* Match status */}
-        <div className="text-sm rounded-xl border p-3 bg-card/70">
-          <div>
-            Round status:{" "}
-            <span className="font-semibold">
-              {raters} / {total}
-            </span>{" "}
-            eligible players submitted.{" "}
-            <span className="font-semibold">
-              {locked ? "Ratings are locked." : "Ratings are open."}
-            </span>
+        {/* Round status */}
+        <div className="text-sm">
+          <div className="mb-3">
+            <span className="font-semibold">{raters} / {total}</span> eligible players submitted.{" "}
+            {locked ? "Ratings are locked." : "Ratings are open."}
           </div>
-        </div>
 
-        {/* Quick roster with status + inline toggle */}
-        <div className="grid gap-2">
-          <div className="text-sm font-semibold">Players & Participation</div>
-          <div className="flex flex-wrap gap-2">
-            {details.map((p) => (
-              <div
-                key={p.name}
-                className="flex items-center gap-2 border rounded-full px-3 py-1 bg-card/60"
-              >
-                <span className="text-sm">{p.name}</span>
-                <Badge variant={p.can_rate ? "default" : "outline"}>
-                  {p.can_rate ? "Can rate" : "Excluded"}
-                </Badge>
-                <Button
-                  size="sm"
-                  variant={p.can_rate ? "outline" : "secondary"}
-                  onClick={() => (p.can_rate ? onExclude(p.name) : onInclude(p.name))}
+          {/* Players & participation chips */}
+          <div className="space-y-2">
+            <div className="font-semibold">Players & Participation</div>
+            <div className="flex flex-wrap gap-3">
+              {players.map((p) => (
+                <div
+                  key={p}
+                  className="flex items-center gap-2 rounded-full border bg-card/60 px-3 py-1.5"
                 >
-                  {p.can_rate ? (
-                    <>
-                      <Ban className="h-4 w-4 mr-1" /> Exclude
-                    </>
-                  ) : (
-                    <>
-                      <Check className="h-4 w-4 mr-1" /> Include
-                    </>
-                  )}
-                </Button>
-              </div>
-            ))}
+                  <span className="text-sm font-medium">{p}</span>
+                  {/* Status pill (we don’t know can_rate on client without /players/details; show neutral) */}
+                  <span className="rounded-full bg-foreground text-background text-[10px] px-2 py-0.5">
+                    Can rate
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onInclude(p)}
+                    title={`Allow ${p} to rate`}
+                  >
+                    Include
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onExclude(p)}
+                    title={`Exclude ${p} from rating`}
+                  >
+                    Exclude
+                  </Button>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
         <Separator />
 
-        {/* Manage players */}
+        {/* Add / Remove */}
         <div className="grid md:grid-cols-2 gap-6">
-          {/* Add */}
-          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
+          <div className="grid gap-3">
             <div className="font-semibold flex items-center gap-2">
               <Plus className="h-4 w-4" /> Add Player
             </div>
@@ -1163,12 +1153,11 @@ function AdminPanel({
               Add Player
             </Button>
             <p className="text-xs text-muted-foreground">
-              New players start with permission <span className="font-semibold">OFF</span>.
+              New players start with permission OFF.
             </p>
           </div>
 
-          {/* Remove */}
-          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
+          <div className="grid gap-3">
             <div className="font-semibold flex items-center gap-2">
               <UserMinus className="h-4 w-4" /> Remove Player from Data
             </div>
@@ -1181,8 +1170,8 @@ function AdminPanel({
               list="players-list"
             />
             <datalist id="players-list">
-              {details.map((p) => (
-                <option key={p.name} value={p.name} />
+              {players.map((p) => (
+                <option key={p} value={p} />
               ))}
             </datalist>
             <Button
@@ -1204,61 +1193,17 @@ function AdminPanel({
           </div>
         </div>
 
-        {/* Include/Exclude quick box */}
-        <div className="grid md:grid-cols-2 gap-6">
-          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
-            <div className="font-semibold flex items-center gap-2">
-              <Ban className="h-4 w-4" /> Exclude / Include (by name)
-            </div>
-            <Label htmlFor="picker">Player</Label>
-            <Input
-              id="picker"
-              value={picker}
-              onChange={(e) => setPicker(e.target.value)}
-              placeholder="Player to include/exclude"
-              list="players-list"
-            />
-            <div className="flex gap-2">
-              <Button
-                variant="destructive"
-                onClick={() => {
-                  if (!picker.trim()) return toast.error("Enter a name.");
-                  onExclude(picker.trim());
-                }}
-              >
-                Exclude
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  if (!picker.trim()) return toast.error("Enter a name.");
-                  onInclude(picker.trim());
-                }}
-              >
-                <Check className="h-4 w-4 mr-1" /> Include
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Totals count only included players.
-            </p>
-          </div>
+        <Separator />
 
-          <div className="grid gap-3 rounded-xl border p-4 bg-card/60">
-            <div className="font-semibold flex items-center gap-2">
-              <Lock className="h-4 w-4" /> Lock/Unlock Rating (everyone)
-            </div>
-            <div className="flex gap-2">
-              <Button onClick={onLock} variant="outline">
-                <Lock className="h-4 w-4 mr-2" /> Lock (exclude all)
-              </Button>
-              <Button onClick={onUnlock} variant="outline">
-                <Unlock className="h-4 w-4 mr-2" /> Unlock (include all)
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Reset also locks rating and starts a new locked round.
-            </p>
+        {/* Put Reset here so header stays clean */}
+        <div className="flex items-center justify-between">
+          <div className="text-xs text-muted-foreground">
+            Reset also locks rating and starts a new locked round.
           </div>
+          <Button variant="destructive" onClick={onReset}>
+            <RefreshCcw className="h-4 w-4 mr-2" />
+            Reset Round
+          </Button>
         </div>
       </CardContent>
     </Card>
