@@ -564,17 +564,28 @@ app.post("/reset", async (req, res) => {
 app.get("/comments", async (req, res) => {
   try {
     const sort = String(req.query.sort || "latest").toLowerCase();
-    let order = "created_at DESC"; // latest
-    if (sort === "oldest") order = "created_at ASC";
-    else if (sort === "likes") order = "likes DESC, created_at DESC";
-    else if (sort === "dislikes") order = "dislikes DESC, created_at DESC";
+    // We sort by computed counts or time after aggregation
+    let orderSql = `ORDER BY c.created_at DESC`;
+    if (sort === "oldest") orderSql = `ORDER BY c.created_at ASC`;
+    else if (sort === "likes") orderSql = `ORDER BY likes DESC, c.created_at DESC`;
+    else if (sort === "dislikes") orderSql = `ORDER BY dislikes DESC, c.created_at DESC`;
 
     const { rows } = await pool.query(
-      `SELECT id, body, likes, dislikes, created_at
-       FROM comments
-       ORDER BY ${order}`
+      `WITH agg AS (
+         SELECT
+           c.id,
+           c.body,
+           c.created_at,
+           COALESCE(SUM(CASE WHEN cr.action='like' THEN 1 ELSE 0 END), 0) AS likes,
+           COALESCE(SUM(CASE WHEN cr.action='dislike' THEN 1 ELSE 0 END), 0) AS dislikes
+         FROM comments c
+         LEFT JOIN comment_reactions cr ON cr.comment_id = c.id
+         GROUP BY c.id
+       )
+       SELECT * FROM agg
+       ${orderSql}`
     );
-    // Hide authors to keep anonymity
+
     res.json({
       ok: true,
       comments: rows.map((r) => ({
@@ -582,8 +593,8 @@ app.get("/comments", async (req, res) => {
         body: r.body,
         likes: Number(r.likes),
         dislikes: Number(r.dislikes),
-        timestamp: r.created_at, // ISO string
-        author: "Anonymous",     // not revealing actual author
+        timestamp: r.created_at,
+        author: "Anonymous",
       })),
     });
   } catch (e) {
@@ -591,6 +602,7 @@ app.get("/comments", async (req, res) => {
     res.status(500).json({ ok: false, error: "db_error" });
   }
 });
+
 
 /**
  * POST /comments
@@ -636,22 +648,43 @@ app.post("/comments", async (req, res) => {
  * Body: { action: 'like' | 'dislike' }
  * Increments counters (no per-user dedupe by design; simple counters).
  */
+// PATCH /comments/:id/react
+// Body: { name, password, action: 'like' | 'dislike' }
 app.patch("/comments/:id/react", async (req, res) => {
   const { id } = req.params;
-  const { action } = req.body || {};
+  const { name, password, action } = req.body || {};
+
   try {
-    let column = null;
-    if (action === "like") column = "likes";
-    else if (action === "dislike") column = "dislikes";
-    else {
+    if (!(await checkCreds(name, password))) {
+      return res.status(401).json({ ok: false, error: "invalid_credentials" });
+    }
+    if (action !== "like" && action !== "dislike") {
       return res.status(400).json({ ok: false, error: "invalid_action" });
     }
 
+    const author = await canonicalName(name);
+
+    // Upsert reaction (one row per user per comment)
+    await pool.query(
+      `INSERT INTO comment_reactions (comment_id, username, action)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (comment_id, username)
+       DO UPDATE SET action = EXCLUDED.action`,
+      [id, author, action]
+    );
+
+    // Return updated comment with fresh counts
     const { rows } = await pool.query(
-      `UPDATE comments
-       SET ${column} = ${column} + 1
-       WHERE id = $1
-       RETURNING id, body, likes, dislikes, created_at`,
+      `SELECT
+         c.id,
+         c.body,
+         c.created_at,
+         COALESCE(SUM(CASE WHEN cr.action='like' THEN 1 ELSE 0 END), 0) AS likes,
+         COALESCE(SUM(CASE WHEN cr.action='dislike' THEN 1 ELSE 0 END), 0) AS dislikes
+       FROM comments c
+       LEFT JOIN comment_reactions cr ON cr.comment_id = c.id
+       WHERE c.id = $1
+       GROUP BY c.id`,
       [id]
     );
     if (rows.length === 0) {
@@ -674,6 +707,7 @@ app.patch("/comments/:id/react", async (req, res) => {
     res.status(500).json({ ok: false, error: "db_error" });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);

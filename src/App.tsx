@@ -244,10 +244,15 @@ async function postComment(name: string, password: string, body: string) {
     body,
   });
 }
-async function reactToComment(id: number, action: "like" | "dislike") {
+async function reactToComment(
+  id: number,
+  action: "like" | "dislike",
+  name: string,
+  password: string
+) {
   return apiSend<{ ok: boolean; comment: CommentItem }>(
     `/comments/${id}/react`,
-    { action },
+    { name, password, action },
     "PATCH"
   );
 }
@@ -876,8 +881,12 @@ export default function App() {
                   }
                 }}
                 onReact={async (id, action) => {
+                  if (!currentUser || !currentPass) {
+                    toast.error("Please login to react.");
+                    return;
+                  }
                   try {
-                    await reactToComment(id, action);
+                    await reactToComment(id, action, currentUser, currentPass);
                     await refreshComments();
                   } catch {
                     toast.error("Could not update reaction.");
