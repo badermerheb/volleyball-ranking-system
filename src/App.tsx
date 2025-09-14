@@ -20,6 +20,10 @@ import {
   UserMinus,
   Lock,
   Unlock,
+  ThumbsUp,
+  ThumbsDown,
+  MessageSquarePlus,
+  Filter,
 } from "lucide-react";
 import VolleyballSpinner from "./components/VolleyballSpinner";
 
@@ -52,6 +56,16 @@ type LbResp = {
 interface PlayerDetail {
   name: string;
   can_rate: boolean;
+}
+
+type CommentSort = "latest" | "oldest" | "most_likes" | "most_dislikes";
+interface CommentItem {
+  id: number;
+  body: string;
+  timestamp: number;
+  likes: number;
+  dislikes: number;
+  myVote: 1 | -1 | null;
 }
 
 /* -------------------- API helpers -------------------- */
@@ -215,6 +229,36 @@ async function adminLockAll(
   });
 }
 
+/* -------- Comments API helpers -------- */
+async function fetchComments(sort: CommentSort, viewerName?: string) {
+  const q = new URLSearchParams({ sort });
+  if (viewerName) q.set("name", viewerName);
+  const data = await apiGet<{ ok: boolean; comments: CommentItem[] }>(
+    `/comments?${q.toString()}`
+  );
+  return data.comments ?? [];
+}
+
+async function postComment(name: string, password: string, body: string) {
+  return apiSend<{ ok: boolean; comment: CommentItem }>(`/comments`, {
+    name,
+    password,
+    body,
+  });
+}
+
+async function voteComment(
+  id: number,
+  name: string,
+  password: string,
+  value: 1 | -1 | 0
+) {
+  return apiSend<{ ok: boolean; comment: { id: number; likes: number; dislikes: number; myVote: 1 | -1 | null } }>(
+    `/comments/${id}/vote`,
+    { name, password, value }
+  );
+}
+
 /* -------------------- Small utils -------------------- */
 function hashStr(str: string) {
   let h = 2166136261 >>> 0;
@@ -293,9 +337,14 @@ export default function App() {
   const [overallRows, setOverallRows] = useState<LeaderboardRow[]>([]);
   const [overallLoading, setOverallLoading] = useState(false);
 
+  // comments state
+  const [comments, setComments] = useState<CommentItem[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentSort, setCommentSort] = useState<CommentSort>("latest");
+
   // UI state
   const [activeTab, setActiveTab] =
-    useState<"rate" | "board" | "overall" | "admin">("rate");
+    useState<"rate" | "board" | "overall" | "comments" | "admin">("rate");
 
   // rating session state (client-only until submit)
   const [pendingOrder, setPendingOrder] = useState<string[]>([]);
@@ -343,6 +392,19 @@ export default function App() {
     }
   }
 
+  async function refreshComments() {
+    if (!currentUser) return;
+    try {
+      setCommentsLoading(true);
+      const data = await fetchComments(commentSort, currentUser);
+      setComments(data);
+    } catch {
+      toast.error("Failed to load comments.");
+    } finally {
+      setCommentsLoading(false);
+    }
+  }
+
   // Persisted login: restore on mount + initial data
   useEffect(() => {
     (async () => {
@@ -358,7 +420,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When user logs in (or after refresh), pull his set + boards
+  // When user logs in (or after refresh), pull his set + boards + comments
   useEffect(() => {
     if (!currentUser) return;
     setMyLoading(true);
@@ -366,7 +428,7 @@ export default function App() {
       try {
         const mine = await fetchMine(currentUser);
         setMyRatings(mine);
-        await Promise.all([refreshLeaderboard(), refreshOverall(), refreshPlayers()]);
+        await Promise.all([refreshLeaderboard(), refreshOverall(), refreshPlayers(), refreshComments()]);
       } catch {
         toast.error("Failed to load data from server.");
       } finally {
@@ -374,6 +436,13 @@ export default function App() {
       }
     })();
   }, [currentUser]);
+
+  // refetch comments when sort changes
+  useEffect(() => {
+    if (activeTab === "comments" && currentUser) {
+      refreshComments().catch(() => {});
+    }
+  }, [commentSort, activeTab, currentUser]);
 
   const hasSubmitted = myRatings.length > 0;
 
@@ -400,6 +469,8 @@ export default function App() {
       refreshPlayers().catch(() => {});
     } else if (activeTab === "rate") {
       Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
+    } else if (activeTab === "comments") {
+      refreshComments().catch(() => {});
     }
   }, [activeTab, currentUser]);
 
@@ -420,6 +491,7 @@ export default function App() {
       if (activeTab === "rate") {
         Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
       }
+      if (activeTab === "comments" && currentUser) refreshComments().catch(() => {});
     }
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -523,6 +595,7 @@ export default function App() {
       if (activeTab === "board") refreshLeaderboard().catch(() => {});
       if (activeTab === "overall") refreshOverall().catch(() => {});
       await refreshPlayers();
+      await refreshComments();
     } catch (e: any) {
       toast.error(e?.message || "Reset failed.");
     }
@@ -538,6 +611,7 @@ export default function App() {
         refreshPlayers(),
         refreshLeaderboard(),
         refreshOverall(),
+        refreshComments(),
       ]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to add player.");
@@ -552,6 +626,7 @@ export default function App() {
         refreshPlayers(),
         refreshLeaderboard(),
         refreshOverall(),
+        refreshComments(),
       ]);
     } catch (e: any) {
       toast.error(e?.message || "Failed to remove player.");
@@ -598,7 +673,8 @@ export default function App() {
     }
   }
 
-  const tabCols = currentUser === "Bader" ? "grid-cols-4" : "grid-cols-3";
+  const tabCols =
+    currentUser === "Bader" ? "grid-cols-5" : "grid-cols-4";
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/30 text-foreground p-4 md:p-10">
@@ -636,7 +712,7 @@ export default function App() {
           <Tabs
             value={activeTab}
             onValueChange={(v) =>
-              setActiveTab(v as "rate" | "board" | "overall" | "admin")
+              setActiveTab(v as "rate" | "board" | "overall" | "comments" | "admin")
             }
             className="w-full"
           >
@@ -644,6 +720,7 @@ export default function App() {
               <TabsTrigger value="rate">Rate Players</TabsTrigger>
               <TabsTrigger value="board">Leaderboard</TabsTrigger>
               <TabsTrigger value="overall">Overall</TabsTrigger>
+              <TabsTrigger value="comments">Comments</TabsTrigger>
               {currentUser === "Bader" && (
                 <TabsTrigger value="admin">Admin</TabsTrigger>
               )}
@@ -780,6 +857,54 @@ export default function App() {
               </motion.div>
             </TabsContent>
 
+            <TabsContent value="comments">
+              <CommentsTab
+                currentUser={currentUser}
+                currentPass={currentPass!}
+                items={comments}
+                loading={commentsLoading}
+                sort={commentSort}
+                onSortChange={(s) => setCommentSort(s)}
+                onRefresh={refreshComments}
+                onPost={async (body) => {
+                  if (!currentUser || !currentPass) return;
+                  try {
+                    const resp = await postComment(currentUser, currentPass, body);
+                    // optimistic: add new comment at top if "latest" sort, else refresh
+                    if (commentSort === "latest") {
+                      setComments((prev) => [
+                        resp.comment,
+                        ...prev,
+                      ]);
+                    } else {
+                      await refreshComments();
+                    }
+                    toast.success("Comment posted.");
+                  } catch (e: any) {
+                    const msg = String(e?.message || "");
+                    if (msg.includes("invalid_credentials")) toast.error("Invalid credentials.");
+                    else if (msg.includes("empty_body")) toast.error("Write something first.");
+                    else toast.error("Failed to post comment.");
+                  }
+                }}
+                onVote={async (id, value) => {
+                  if (!currentUser || !currentPass) return;
+                  try {
+                    const resp = await voteComment(id, currentUser, currentPass, value);
+                    setComments((prev) =>
+                      prev.map((c) =>
+                        c.id === id
+                          ? { ...c, likes: resp.comment.likes, dislikes: resp.comment.dislikes, myVote: resp.comment.myVote }
+                          : c
+                      )
+                    );
+                  } catch {
+                    toast.error("Failed to register your vote.");
+                  }
+                }}
+              />
+            </TabsContent>
+
             {currentUser === "Bader" && (
               <TabsContent value="admin">
                 <AdminPanel
@@ -794,6 +919,7 @@ export default function App() {
                       refreshPlayers(),
                       refreshLeaderboard(),
                       refreshOverall(),
+                      refreshComments(),
                     ]);
                     toast("Refreshed.");
                   }}
@@ -1120,6 +1246,138 @@ function RateFlow({
                 resets the round.
               </p>
             </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* -------------------- Comments Tab -------------------- */
+function CommentsTab({
+  currentUser,
+  currentPass,
+  items,
+  loading,
+  sort,
+  onSortChange,
+  onRefresh,
+  onPost,
+  onVote,
+}: {
+  currentUser: string;
+  currentPass: string;
+  items: CommentItem[];
+  loading: boolean;
+  sort: CommentSort;
+  onSortChange: (s: CommentSort) => void;
+  onRefresh: () => void;
+  onPost: (body: string) => void;
+  onVote: (id: number, value: 1 | -1 | 0) => void;
+}) {
+  const [text, setText] = useState("");
+  const postingDisabled = !text.trim();
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center justify-between">
+          <span className="inline-flex items-center gap-2">
+            <MessageSquarePlus className="h-5 w-5" />
+            Anonymous Comments
+          </span>
+          <div className="flex items-center gap-2">
+            <Filter className="h-4 w-4" />
+            <select
+              className="px-2 py-1 rounded-md border bg-card"
+              value={sort}
+              onChange={(e) => onSortChange(e.target.value as CommentSort)}
+            >
+              <option value="latest">Latest</option>
+              <option value="oldest">Oldest</option>
+              <option value="most_likes">Most likes</option>
+              <option value="most_dislikes">Most dislikes</option>
+            </select>
+            <Button variant="outline" size="sm" onClick={onRefresh}>
+              Refresh
+            </Button>
+          </div>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-6">
+        {/* composer */}
+        <div className="grid gap-2">
+          <Label htmlFor="new-comment">Post a comment (your name is hidden)</Label>
+          <textarea
+            id="new-comment"
+            className="min-h-[88px] rounded-xl border p-3 bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+            placeholder="Share feedback, ideas, or observations…"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            maxLength={1000}
+          />
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-muted-foreground">
+              Be respectful. Max 1000 characters.
+            </div>
+            <Button
+              disabled={postingDisabled}
+              onClick={() => {
+                const body = text.trim();
+                if (!body) return;
+                onPost(body);
+                setText("");
+              }}
+            >
+              Post Comment
+            </Button>
+          </div>
+        </div>
+
+        <Separator />
+
+        {/* list */}
+        {loading ? (
+          <div className="text-sm text-muted-foreground">Loading comments…</div>
+        ) : items.length === 0 ? (
+          <div className="text-sm text-muted-foreground">No comments yet. Be the first!</div>
+        ) : (
+          <div className="grid gap-3">
+            {items.map((c) => (
+              <div
+                key={c.id}
+                className="rounded-2xl border bg-card/60 p-3 grid gap-2"
+              >
+                <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                  {c.body}
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="text-xs text-muted-foreground">
+                    {new Date(c.timestamp).toLocaleString()}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant={c.myVote === 1 ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => onVote(c.id, c.myVote === 1 ? 0 : 1)}
+                      title="Like"
+                    >
+                      <ThumbsUp className="h-4 w-4 mr-1" />
+                      {c.likes}
+                    </Button>
+                    <Button
+                      variant={c.myVote === -1 ? "destructive" : "outline"}
+                      size="sm"
+                      onClick={() => onVote(c.id, c.myVote === -1 ? 0 : -1)}
+                      title="Dislike"
+                    >
+                      <ThumbsDown className="h-4 w-4 mr-1" />
+                      {c.dislikes}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </CardContent>

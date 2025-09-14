@@ -131,7 +131,6 @@ async function ensureSchema() {
       return `($${b + 1}, $${b + 2})`;
     });
     await pool.query(`INSERT INTO players(name, password) VALUES ${ph.join(",")}`, values);
-    // optional: turn on for seed (you can remove this if you want OFF by default)
     await pool.query(`UPDATE players SET can_rate = TRUE WHERE name = ANY($1)`, [
       seed.map((s) => s[0]),
     ]);
@@ -145,6 +144,36 @@ async function ensureSchema() {
     WITH first_match AS (SELECT id FROM matches ORDER BY id ASC LIMIT 1)
     UPDATE ratings SET match_id = (SELECT id FROM first_match)
     WHERE match_id IS NULL;
+  `);
+
+  /* ---------- NEW: comments + votes ---------- */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS comments (
+      id BIGSERIAL PRIMARY KEY,
+      match_id BIGINT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+      author TEXT NOT NULL REFERENCES players(name) ON DELETE CASCADE,
+      body TEXT NOT NULL CHECK (length(trim(body)) > 0),
+      ts BIGINT NOT NULL
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS comments_match_ts_idx
+    ON comments (match_id, ts DESC);
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS comment_votes (
+      comment_id BIGINT NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+      voter TEXT NOT NULL REFERENCES players(name) ON DELETE CASCADE,
+      value SMALLINT NOT NULL CHECK (value IN (-1, 1)),
+      ts BIGINT NOT NULL,
+      PRIMARY KEY (comment_id, voter)
+    );
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS comment_votes_comment_idx ON comment_votes (comment_id);
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS comment_votes_voter_idx ON comment_votes (voter);
   `);
 }
 ensureSchema().catch((e) => {
@@ -349,8 +378,7 @@ app.post("/admin/lock", async (req, res) => {
   }
 });
 
-// Submit ratings (must have can_rate and match must be unlocked)
-// ALSO: ratees must be players who can_rate (eligible targets only)
+// Submit ratings
 app.post("/submit", async (req, res) => {
   const { name, password, entries } = req.body || {};
   try {
@@ -391,8 +419,8 @@ app.post("/submit", async (req, res) => {
     for (const e of entries) {
       const score = Number(e.score);
       if (
-        !setEligible.has(e.ratee) || // must be eligible
-        e.ratee.toLowerCase() === raterName.toLowerCase() // cannot rate self
+        !setEligible.has(e.ratee) ||
+        e.ratee.toLowerCase() === raterName.toLowerCase()
       ) {
         return res.status(400).json({ ok: false, error: "invalid_ratee" });
       }
@@ -527,6 +555,179 @@ app.post("/reset", async (req, res) => {
       `INSERT INTO matches (locked) VALUES (TRUE) RETURNING id`
     );
     res.json({ ok: true, closedMatch: match.id, locked: true, newMatch: rows[0].id });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
+  }
+});
+
+/* -------------------- NEW: Comments APIs -------------------- */
+
+/**
+ * GET /comments?sort=latest|oldest|most_likes|most_dislikes[&name=<player>]
+ * Returns anonymous comments for the current match with like/dislike counts.
+ * If ?name is provided (no password), we also return that user's vote on each comment.
+ */
+app.get("/comments", async (req, res) => {
+  try {
+    const match = await getCurrentMatch();
+    const sort = String(req.query.sort || "latest").toLowerCase();
+    const viewer = req.query.name ? await canonicalName(String(req.query.name)) : null;
+
+    // base aggregated rows
+    const base = `
+      SELECT
+        c.id,
+        c.ts,
+        c.body,
+        COALESCE(SUM(CASE WHEN v.value = 1 THEN 1 ELSE 0 END), 0)::int AS likes,
+        COALESCE(SUM(CASE WHEN v.value = -1 THEN 1 ELSE 0 END), 0)::int AS dislikes
+      FROM comments c
+      LEFT JOIN comment_votes v ON v.comment_id = c.id
+      WHERE c.match_id = $1
+      GROUP BY c.id
+    `;
+
+    let orderBy = "ORDER BY c.ts DESC";
+    if (sort === "oldest") orderBy = "ORDER BY c.ts ASC";
+    else if (sort === "most_likes") orderBy = "ORDER BY likes DESC, c.ts DESC";
+    else if (sort === "most_dislikes") orderBy = "ORDER BY dislikes DESC, c.ts DESC";
+
+    const { rows } = await pool.query(`${base} ${orderBy}`);
+
+    if (!viewer) {
+      return res.json({ ok: true, comments: rows.map(r => ({
+        id: Number(r.id),
+        timestamp: Number(r.ts),
+        body: r.body,
+        likes: Number(r.likes),
+        dislikes: Number(r.dislikes),
+        myVote: null
+      })) });
+    }
+
+    // fetch viewer votes in one query
+    const ids = rows.map(r => r.id);
+    let voteMap = new Map();
+    if (ids.length) {
+      const { rows: votes } = await pool.query(
+        `SELECT comment_id, value FROM comment_votes WHERE voter = $1 AND comment_id = ANY($2::bigint[])`,
+        [viewer, ids]
+      );
+      voteMap = new Map(votes.map(v => [String(v.comment_id), Number(v.value)]));
+    }
+
+    return res.json({
+      ok: true,
+      comments: rows.map(r => ({
+        id: Number(r.id),
+        timestamp: Number(r.ts),
+        body: r.body,
+        likes: Number(r.likes),
+        dislikes: Number(r.dislikes),
+        myVote: voteMap.get(String(r.id)) ?? null
+      }))
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
+  }
+});
+
+/**
+ * POST /comments
+ * { name, password, body }
+ * Creates a new anonymous comment for the *current match*.
+ */
+app.post("/comments", async (req, res) => {
+  try {
+    const { name, password, body } = req.body || {};
+    if (!(await checkCreds(name, password))) {
+      return res.status(401).json({ ok: false, error: "invalid_credentials" });
+    }
+    const clean = String(body || "").trim();
+    if (!clean) return res.status(400).json({ ok: false, error: "empty_body" });
+
+    const match = await getCurrentMatch();
+    const author = await canonicalName(name);
+    const ts = now();
+    const { rows } = await pool.query(
+      `INSERT INTO comments(match_id, author, body, ts)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, ts, body`,
+      [match.id, author, clean, ts]
+    );
+
+    res.json({
+      ok: true,
+      comment: {
+        id: Number(rows[0].id),
+        timestamp: Number(rows[0].ts),
+        body: rows[0].body,
+        likes: 0,
+        dislikes: 0,
+        myVote: null
+      }
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
+  }
+});
+
+/**
+ * POST /comments/:id/vote
+ * { name, password, value } where value ∈ {1, -1, 0}; 0 removes vote
+ */
+app.post("/comments/:id/vote", async (req, res) => {
+  try {
+    const { name, password, value } = req.body || {};
+    const commentId = Number(req.params.id);
+    if (!Number.isFinite(commentId)) {
+      return res.status(400).json({ ok: false, error: "invalid_comment_id" });
+    }
+    if (!(await checkCreds(name, password))) {
+      return res.status(401).json({ ok: false, error: "invalid_credentials" });
+    }
+    const voter = await canonicalName(name);
+    const val = Number(value);
+    const ts = now();
+
+    if (val === 0) {
+      await pool.query(
+        `DELETE FROM comment_votes WHERE comment_id = $1 AND voter = $2`,
+        [commentId, voter]
+      );
+    } else if (val === 1 || val === -1) {
+      await pool.query(
+        `INSERT INTO comment_votes(comment_id, voter, value, ts)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (comment_id, voter)
+         DO UPDATE SET value = EXCLUDED.value, ts = EXCLUDED.ts`,
+        [commentId, voter, val, ts]
+      );
+    } else {
+      return res.status(400).json({ ok: false, error: "invalid_value" });
+    }
+
+    // return updated counts
+    const { rows } = await pool.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN value = 1 THEN 1 ELSE 0 END), 0)::int AS likes,
+         COALESCE(SUM(CASE WHEN value = -1 THEN 1 ELSE 0 END), 0)::int AS dislikes
+       FROM comment_votes WHERE comment_id = $1`,
+      [commentId]
+    );
+
+    res.json({
+      ok: true,
+      comment: {
+        id: commentId,
+        likes: Number(rows[0].likes || 0),
+        dislikes: Number(rows[0].dislikes || 0),
+        myVote: val === 0 ? null : val
+      }
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
