@@ -20,11 +20,6 @@ import {
   UserMinus,
   Lock,
   Unlock,
-  ThumbsUp,
-  ThumbsDown,
-  MessageSquareText,
-  Filter,
-  SendHorizonal,
 } from "lucide-react";
 import VolleyballSpinner from "./components/VolleyballSpinner";
 
@@ -59,14 +54,15 @@ interface PlayerDetail {
   can_rate: boolean;
 }
 
-type CommentSort = "latest" | "oldest" | "likes" | "dislikes";
+/* ==== COMMENTS: types ==== */
+type CommentSort = "latest" | "oldest" | "most_likes" | "most_dislikes";
 interface CommentItem {
   id: number;
-  author: string;     // will always be "Anonymous" from server
+  author: string;
   body: string;
   likes: number;
   dislikes: number;
-  timestamp: string;  // ISO
+  created_at: string; // ISO
 }
 
 /* -------------------- API helpers -------------------- */
@@ -145,12 +141,12 @@ async function fetchMine(name: string): Promise<RatingEntry[]> {
   return data.ratings ?? [];
 }
 
-// login
+// login (server authoritative, case-insensitive username on server)
 async function login(name: string, password: string) {
   return apiSend<{ ok: boolean; name: string }>("/login", { name, password });
 }
 
-// submit my run
+// submit my run (uses stored pass)
 async function submitRun(
   name: string,
   password: string,
@@ -230,13 +226,14 @@ async function adminLockAll(
   });
 }
 
-/* ---------- NEW: Comments API ---------- */
+/* ==== COMMENTS: API ==== */
 async function fetchComments(sort: CommentSort): Promise<CommentItem[]> {
   const data = await apiGet<{ ok: boolean; comments: CommentItem[] }>(
     `/comments?sort=${encodeURIComponent(sort)}`
   );
   return data.comments ?? [];
 }
+
 async function postComment(name: string, password: string, body: string) {
   return apiSend<{ ok: boolean; comment: CommentItem }>(`/comments`, {
     name,
@@ -244,17 +241,19 @@ async function postComment(name: string, password: string, body: string) {
     body,
   });
 }
-async function reactToComment(
-  id: number,
-  action: "like" | "dislike",
+
+async function voteComment(
   name: string,
-  password: string
+  password: string,
+  comment_id: number,
+  type: "like" | "dislike"
 ) {
-  return apiSend<{ ok: boolean; comment: CommentItem }>(
-    `/comments/${id}/react`,
-    { name, password, action },
-    "PATCH"
-  );
+  return apiSend<{ ok: boolean; comment: CommentItem }>(`/comments/vote`, {
+    name,
+    password,
+    comment_id,
+    type,
+  });
 }
 
 /* -------------------- Small utils -------------------- */
@@ -335,12 +334,6 @@ export default function App() {
   const [overallRows, setOverallRows] = useState<LeaderboardRow[]>([]);
   const [overallLoading, setOverallLoading] = useState(false);
 
-  // NEW: comments state
-  const [comments, setComments] = useState<CommentItem[]>([]);
-  const [commentsLoading, setCommentsLoading] = useState(false);
-  const [commentText, setCommentText] = useState("");
-  const [commentSort, setCommentSort] = useState<CommentSort>("latest");
-
   // UI state
   const [activeTab, setActiveTab] =
     useState<"rate" | "board" | "overall" | "comments" | "admin">("rate");
@@ -352,6 +345,12 @@ export default function App() {
   const [sessionRatings, setSessionRatings] = useState<
     { ratee: string; score: number }[]
   >([]);
+
+  /* ==== COMMENTS: state ==== */
+  const [comments, setComments] = useState<CommentItem[]>([]);
+  const [commentSort, setCommentSort] = useState<CommentSort>("latest");
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [newComment, setNewComment] = useState("");
 
   // helper: refresh leaderboard (with loading flag)
   async function refreshLeaderboard() {
@@ -391,19 +390,6 @@ export default function App() {
     }
   }
 
-  // NEW: refresh comments
-  async function refreshComments(sort: CommentSort = commentSort) {
-    try {
-      setCommentsLoading(true);
-      const list = await fetchComments(sort);
-      setComments(list);
-    } catch {
-      toast.error("Failed to load comments.");
-    } finally {
-      setCommentsLoading(false);
-    }
-  }
-
   // Persisted login: restore on mount + initial data
   useEffect(() => {
     (async () => {
@@ -427,7 +413,7 @@ export default function App() {
       try {
         const mine = await fetchMine(currentUser);
         setMyRatings(mine);
-        await Promise.all([refreshLeaderboard(), refreshOverall(), refreshPlayers(), refreshComments()]);
+        await Promise.all([refreshLeaderboard(), refreshOverall(), refreshPlayers()]);
       } catch {
         toast.error("Failed to load data from server.");
       } finally {
@@ -461,8 +447,6 @@ export default function App() {
       refreshPlayers().catch(() => {});
     } else if (activeTab === "rate") {
       Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
-    } else if (activeTab === "comments") {
-      refreshComments().catch(() => {});
     }
   }, [activeTab, currentUser]);
 
@@ -483,11 +467,26 @@ export default function App() {
       if (activeTab === "rate") {
         Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
       }
-      if (activeTab === "comments") refreshComments().catch(() => {});
     }
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [activeTab, currentUser]);
+
+  /* ==== COMMENTS: fetch on tab/sort change ==== */
+  useEffect(() => {
+    if (activeTab !== "comments") return;
+    (async () => {
+      try {
+        setCommentsLoading(true);
+        const list = await fetchComments(commentSort);
+        setComments(list);
+      } catch {
+        toast.error("Failed to load comments.");
+      } finally {
+        setCommentsLoading(false);
+      }
+    })();
+  }, [activeTab, commentSort]);
 
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
@@ -685,6 +684,7 @@ export default function App() {
               }
               try {
                 const resp = await login(name, pass);
+                // store the canonical name so "bader" becomes "Bader"
                 localStorage.setItem(LS_USER_KEY, resp.name);
                 localStorage.setItem(LS_PASS_KEY, pass);
                 setCurrentUser(resp.name);
@@ -844,52 +844,52 @@ export default function App() {
               </motion.div>
             </TabsContent>
 
+            {/* ==== COMMENTS: tab ==== */}
             <TabsContent value="comments">
               <CommentsPanel
                 currentUser={currentUser}
                 currentPass={currentPass}
                 comments={comments}
-                sort={commentSort}
                 loading={commentsLoading}
-                text={commentText}
-                onTextChange={setCommentText}
-                onSortChange={async (s) => {
-                  setCommentSort(s);
-                  await refreshComments(s);
-                }}
-                onRefresh={async () => refreshComments()}
-                onSend={async () => {
+                sort={commentSort}
+                onSortChange={setCommentSort}
+                newComment={newComment}
+                onChangeNew={setNewComment}
+                onPost={async () => {
                   if (!currentUser || !currentPass) {
-                    toast.error("Please login to post a comment.");
+                    toast.error("Please log in to post.");
                     return;
                   }
-                  const trimmed = commentText.trim();
-                  if (!trimmed) {
-                    toast.error("Write something first.");
+                  const body = newComment.trim();
+                  if (!body) {
+                    toast.error("Comment cannot be empty.");
                     return;
                   }
                   try {
-                    await postComment(currentUser, currentPass, trimmed);
-                    setCommentText("");
-                    await refreshComments();
-                    toast.success("Comment posted.");
+                    await postComment(currentUser, currentPass, body);
+                    setNewComment("");
+                    const list = await fetchComments(commentSort);
+                    setComments(list);
+                    toast.success("Posted anonymously.");
                   } catch (e: any) {
-                    const msg = String(e?.message || "");
-                    if (msg.includes("invalid_credentials")) toast.error("Session expired. Re-login.");
-                    else if (msg.includes("empty_body")) toast.error("Comment cannot be empty.");
-                    else toast.error("Failed to post comment.");
+                    const msg = e?.message || "";
+                    if (msg.includes("invalid_credentials")) toast.error("Session expired. Log in again.");
+                    else toast.error("Failed to post.");
                   }
                 }}
-                onReact={async (id, action) => {
+                onVote={async (id, type) => {
                   if (!currentUser || !currentPass) {
-                    toast.error("Please login to react.");
+                    toast.error("Please log in to vote.");
                     return;
                   }
                   try {
-                    await reactToComment(id, action, currentUser, currentPass);
-                    await refreshComments();
-                  } catch {
-                    toast.error("Could not update reaction.");
+                    const { comment } = await voteComment(currentUser, currentPass, id, type);
+                    setComments((prev) => prev.map((c) => (c.id === id ? comment : c)));
+                  } catch (e: any) {
+                    const msg = e?.message || "";
+                    if (msg.includes("invalid_credentials")) toast.error("Session expired. Log in again.");
+                    else if (msg.includes("comment_not_found")) toast.error("Comment not found.");
+                    else toast.error("Failed to vote.");
                   }
                 }}
               />
@@ -1322,136 +1322,112 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   );
 }
 
-/* -------------------- NEW: Comments Panel -------------------- */
+/* ==================== Comments Panel ==================== */
 function CommentsPanel({
   currentUser,
   currentPass,
   comments,
-  sort,
   loading,
-  text,
-  onTextChange,
+  sort,
   onSortChange,
-  onRefresh,
-  onSend,
-  onReact,
+  newComment,
+  onChangeNew,
+  onPost,
+  onVote,
 }: {
   currentUser: string | null;
   currentPass: string | null;
   comments: CommentItem[];
-  sort: CommentSort;
   loading: boolean;
-  text: string;
-  onTextChange: (v: string) => void;
-  onSortChange: (v: CommentSort) => void;
-  onRefresh: () => void;
-  onSend: () => void;
-  onReact: (id: number, action: "like" | "dislike") => void;
+  sort: CommentSort;
+  onSortChange: (s: CommentSort) => void;
+  newComment: string;
+  onChangeNew: (v: string) => void;
+  onPost: () => void;
+  onVote: (id: number, type: "like" | "dislike") => void;
 }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center justify-between">
-          <span className="inline-flex items-center gap-2">
-            <MessageSquareText className="h-5 w-5" /> Anonymous Comments
-          </span>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2">
-              <Filter className="h-4 w-4" />
-              <select
-                className="bg-transparent border rounded-md px-2 py-1 text-sm"
-                value={sort}
-                onChange={(e) => onSortChange(e.target.value as CommentSort)}
-              >
-                <option value="latest">Latest</option>
-                <option value="oldest">Oldest</option>
-                <option value="likes">Most Likes</option>
-                <option value="dislikes">Most Dislikes</option>
-              </select>
-            </div>
-            <Button variant="outline" size="sm" onClick={onRefresh}>
-              Refresh
-            </Button>
+          <span>Comments</span>
+          <div className="flex items-center gap-2 text-sm">
+            <Label htmlFor="sort">Sort</Label>
+            <select
+              id="sort"
+              className="px-2 py-1 rounded-md border bg-background"
+              value={sort}
+              onChange={(e) => onSortChange(e.target.value as CommentSort)}
+            >
+              <option value="latest">Latest</option>
+              <option value="oldest">Oldest</option>
+              <option value="most_likes">Most Likes</option>
+              <option value="most_dislikes">Most Dislikes</option>
+            </select>
           </div>
         </CardTitle>
       </CardHeader>
       <CardContent className="grid gap-6">
-        {/* composer */}
+        {/* Post box */}
         <div className="grid gap-2">
-          <Label htmlFor="comment">Post a comment</Label>
+          <Label htmlFor="comment">Post a comment (anonymous)</Label>
           <textarea
             id="comment"
-            className="w-full min-h-[96px] rounded-xl border bg-background px-3 py-2 outline-none"
-            placeholder={currentUser ? "Be kind. No names. Keep it constructive." : "Login to post…"}
-            value={text}
-            onChange={(e) => onTextChange(e.target.value)}
-            disabled={!currentUser || !currentPass}
+            className="min-h-[90px] resize-y rounded-md border bg-background p-2"
+            placeholder={currentUser ? "Share your thoughts…" : "Login to post"}
+            value={newComment}
+            onChange={(e) => onChangeNew(e.target.value)}
+            disabled={!currentUser}
           />
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Posted comments are anonymous.</span>
-            <Button
-              size="sm"
-              onClick={onSend}
-              disabled={!currentUser || !currentPass || !text.trim()}
-              title={!currentUser ? "Please login" : "Send"}
-            >
-              <SendHorizonal className="h-4 w-4 mr-2" />
-              Send
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">
+              Posted as <span className="font-semibold">Anonymous</span>
+            </span>
+            <Button size="sm" onClick={onPost} disabled={!currentUser || !currentPass}>
+              Post
             </Button>
           </div>
         </div>
 
         <Separator />
 
-        {/* list */}
+        {/* List */}
         {loading ? (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <VolleyballSpinner size={20} label="Loading comments…" />
-          </div>
+          <div className="text-sm text-muted-foreground">Loading comments…</div>
         ) : comments.length === 0 ? (
           <div className="text-sm text-muted-foreground">No comments yet.</div>
         ) : (
-          <div className="grid gap-3">
-            {comments.map((c) => {
-              const date = new Date(c.timestamp);
-              return (
-                <div
-                  key={c.id}
-                  className="rounded-2xl border bg-card/60 p-3 grid gap-2"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs text-muted-foreground">
-                      {date.toLocaleDateString()} • {date.toLocaleTimeString()}
-                    </div>
-                    <Badge variant="secondary" className="text-[10px]">
-                      {c.author}
-                    </Badge>
-                  </div>
-                  <div className="text-sm whitespace-pre-wrap">{c.body}</div>
-                  <div className="flex items-center gap-3">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onReact(c.id, "like")}
-                      title="Like"
-                    >
-                      <ThumbsUp className="h-4 w-4 mr-2" />
-                      {c.likes}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onReact(c.id, "dislike")}
-                      title="Dislike"
-                    >
-                      <ThumbsDown className="h-4 w-4 mr-2" />
-                      {c.dislikes}
-                    </Button>
-                  </div>
+          <ul className="grid gap-3">
+            {comments.map((c) => (
+              <li
+                key={c.id}
+                className="p-3 rounded-2xl border bg-card/60"
+              >
+                <div className="text-xs text-muted-foreground mb-1">
+                  {new Date(c.created_at).toLocaleString()}
                 </div>
-              );
-            })}
-          </div>
+                <div className="whitespace-pre-wrap">{c.body}</div>
+                <div className="flex items-center gap-3 mt-2 text-sm">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onVote(c.id, "like")}
+                    title="Like"
+                  >
+                    👍 {c.likes}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onVote(c.id, "dislike")}
+                    title="Dislike"
+                  >
+                    👎 {c.dislikes}
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
       </CardContent>
     </Card>
@@ -1537,33 +1513,33 @@ function AdminPanel({
             eligible players submitted.
           </div>
 
-        {/* Players & participation chips */}
-        <div className="space-y-2">
-          <div className="font-semibold">Players & Participation</div>
-          <div className="flex flex-wrap gap-3">
-            {players.map((p) => {
-              const included = !!canRateMap.get(p.toLowerCase());
-              return (
-                <div
-                  key={p}
-                  className={`flex items-center gap-2 rounded-full border bg-card/60 px-3 py-1.5 ${
-                    included ? "border-green-500/50" : "border-red-500/50"
-                  }`}
-                >
-                  <span className="text-sm font-medium">{p}</span>
-                  <Button
-                    variant={included ? "outline" : "secondary"}
-                    size="sm"
-                    onClick={() => (included ? onExclude(p) : onInclude(p))}
-                    title={included ? `Exclude ${p}` : `Include ${p}`}
+          {/* Players & participation chips — ONLY verb + colored bubble */}
+          <div className="space-y-2">
+            <div className="font-semibold">Players & Participation</div>
+            <div className="flex flex-wrap gap-3">
+              {players.map((p) => {
+                const included = !!canRateMap.get(p.toLowerCase());
+                return (
+                  <div
+                    key={p}
+                    className={`flex items-center gap-2 rounded-full border bg-card/60 px-3 py-1.5 ${
+                      included ? "border-green-500/50" : "border-red-500/50"
+                    }`}
                   >
-                    {included ? "Exclude" : "Include"}
-                  </Button>
-                </div>
-              );
-            })}
+                    <span className="text-sm font-medium">{p}</span>
+                    <Button
+                      variant={included ? "outline" : "secondary"}
+                      size="sm"
+                      onClick={() => (included ? onExclude(p) : onInclude(p))}
+                      title={included ? `Exclude ${p}` : `Include ${p}`}
+                    >
+                      {included ? "Exclude" : "Include"}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
         </div>
 
         <Separator />

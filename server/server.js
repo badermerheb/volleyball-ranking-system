@@ -56,7 +56,7 @@ async function ensureSchema() {
   `);
   await pool.query(`ALTER TABLE ratings ADD COLUMN IF NOT EXISTS match_id BIGINT;`);
 
-  // FK constraints (idempotent)
+  // FKs idempotent
   await pool.query(`
     DO $$
     BEGIN
@@ -146,36 +146,32 @@ async function ensureSchema() {
     WHERE match_id IS NULL;
   `);
 
-  /* ---------- NEW: comments (single table, anonymous to clients) ---------- */
+  /* ===== COMMENTS: tables ===== */
   await pool.query(`
     CREATE TABLE IF NOT EXISTS comments (
       id BIGSERIAL PRIMARY KEY,
-      author TEXT NOT NULL,
+      author TEXT NOT NULL DEFAULT 'Anonymous',
       body TEXT NOT NULL CHECK (length(trim(body)) > 0),
-      likes INTEGER NOT NULL DEFAULT 0 CHECK (likes >= 0),
-      dislikes INTEGER NOT NULL DEFAULT 0 CHECK (dislikes >= 0),
+      likes INTEGER NOT NULL DEFAULT 0,
+      dislikes INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS comments_created_at_idx ON comments (created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS comments_likes_idx ON comments (likes DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS comments_dislikes_idx ON comments (dislikes DESC);`);
 
   await pool.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM information_schema.table_constraints
-        WHERE constraint_name = 'comments_author_fkey'
-      ) THEN
-        ALTER TABLE comments
-          ADD CONSTRAINT comments_author_fkey
-          FOREIGN KEY (author) REFERENCES players(name)
-          ON DELETE SET NULL;
-      END IF;
-    END$$;
+    CREATE TABLE IF NOT EXISTS comment_voters (
+      id BIGSERIAL PRIMARY KEY,
+      voter TEXT NOT NULL,
+      vote_type TEXT NOT NULL CHECK (vote_type IN ('like','dislike')),
+      comment_id BIGINT NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (voter, comment_id)
+    );
   `);
-
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comments_created_at ON comments (created_at DESC);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comments_likes ON comments (likes DESC);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_comments_dislikes ON comments (dislikes DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS comment_voters_comment_idx ON comment_voters (comment_id);`);
 }
 ensureSchema().catch((e) => {
   console.error("Schema init failed", e);
@@ -306,12 +302,11 @@ app.delete("/admin/players", async (req, res) => {
   }
 });
 
-// ADMIN: include/exclude one player (toggle can_rate for a single name)
+// ADMIN: include/exclude one player (toggle can_rate)
 async function togglePlayerPermission(req, res) {
   try {
     const { adminName, adminPassword, name } = req.body || {};
     let { can_rate } = req.body || {};
-
     if (
       !(
         adminName &&
@@ -321,7 +316,6 @@ async function togglePlayerPermission(req, res) {
     ) {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
-
     if (typeof can_rate === "string") {
       const t = can_rate.trim().toLowerCase();
       if (t === "true" || t === "1" || t === "yes") can_rate = true;
@@ -330,17 +324,11 @@ async function togglePlayerPermission(req, res) {
     if (!name || typeof can_rate !== "boolean") {
       return res.status(400).json({ ok: false, error: "invalid_payload" });
     }
-
     const result = await pool.query(
-      `UPDATE players
-         SET can_rate = $1
-       WHERE LOWER(TRIM(name)) = LOWER(TRIM($2))`,
+      `UPDATE players SET can_rate = $1 WHERE LOWER(TRIM(name)) = LOWER(TRIM($2))`,
       [can_rate, name]
     );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ ok: false, error: "not_found" });
-    }
+    if (result.rowCount === 0) return res.status(404).json({ ok: false, error: "not_found" });
     return res.json({ ok: true, name, can_rate });
   } catch (e) {
     console.error(e);
@@ -350,7 +338,7 @@ async function togglePlayerPermission(req, res) {
 app.patch("/admin/players/permission", togglePlayerPermission);
 app.post("/admin/players/permission", togglePlayerPermission);
 
-// ADMIN: lock/unlock for everyone (bulk set can_rate, and set match lock)
+// ADMIN: lock/unlock all (bulk)
 app.post("/admin/lock", async (req, res) => {
   const { name, password, locked } = req.body || {};
   try {
@@ -358,15 +346,9 @@ app.post("/admin/lock", async (req, res) => {
       return res.status(403).json({ ok: false, error: "admin_only" });
     }
     const match = await getCurrentMatch();
-
     await pool.query(`UPDATE matches SET locked = $1 WHERE id = $2`, [!!locked, match.id]);
-
-    if (locked) {
-      await pool.query(`UPDATE players SET can_rate = FALSE`);
-    } else {
-      await pool.query(`UPDATE players SET can_rate = TRUE`);
-    }
-
+    if (locked) await pool.query(`UPDATE players SET can_rate = FALSE`);
+    else await pool.query(`UPDATE players SET can_rate = TRUE`);
     res.json({ ok: true, locked: !!locked });
   } catch (e) {
     console.error(e);
@@ -413,10 +395,7 @@ app.post("/submit", async (req, res) => {
 
     for (const e of entries) {
       const score = Number(e.score);
-      if (
-        !setEligible.has(e.ratee) ||
-        e.ratee.toLowerCase() === raterName.toLowerCase()
-      ) {
+      if (!setEligible.has(e.ratee) || e.ratee.toLowerCase() === raterName.toLowerCase()) {
         return res.status(400).json({ ok: false, error: "invalid_ratee" });
       }
       if (!Number.isFinite(score) || score < 1 || score > 10) {
@@ -504,7 +483,7 @@ app.get("/leaderboard", async (_req, res) => {
   }
 });
 
-// overall leaderboard over locked matches
+// overall leaderboard
 app.get("/leaderboard/overall", async (_req, res) => {
   try {
     const { rows } = await pool.query(
@@ -556,87 +535,52 @@ app.post("/reset", async (req, res) => {
   }
 });
 
-/* -------------------- NEW: Comments routes (anonymous to clients) -------------------- */
+/* ========================== COMMENTS API ========================== */
+
 /**
- * GET /comments?sort=latest|oldest|likes|dislikes
- * Returns anonymous comments list. Server hides 'author'.
+ * GET /comments?sort=latest|oldest|most_likes|most_dislikes
  */
 app.get("/comments", async (req, res) => {
   try {
     const sort = String(req.query.sort || "latest").toLowerCase();
-    // We sort by computed counts or time after aggregation
-    let orderSql = `ORDER BY c.created_at DESC`;
-    if (sort === "oldest") orderSql = `ORDER BY c.created_at ASC`;
-    else if (sort === "likes") orderSql = `ORDER BY likes DESC, c.created_at DESC`;
-    else if (sort === "dislikes") orderSql = `ORDER BY dislikes DESC, c.created_at DESC`;
+    let orderBy = "created_at DESC";
+    if (sort === "oldest") orderBy = "created_at ASC";
+    else if (sort === "most_likes") orderBy = "likes DESC, created_at DESC";
+    else if (sort === "most_dislikes") orderBy = "dislikes DESC, created_at DESC";
 
     const { rows } = await pool.query(
-      `WITH agg AS (
-         SELECT
-           c.id,
-           c.body,
-           c.created_at,
-           COALESCE(SUM(CASE WHEN cr.action='like' THEN 1 ELSE 0 END), 0) AS likes,
-           COALESCE(SUM(CASE WHEN cr.action='dislike' THEN 1 ELSE 0 END), 0) AS dislikes
-         FROM comments c
-         LEFT JOIN comment_reactions cr ON cr.comment_id = c.id
-         GROUP BY c.id
-       )
-       SELECT * FROM agg
-       ${orderSql}`
+      `SELECT id, author, body, likes, dislikes, created_at
+       FROM comments
+       ORDER BY ${orderBy}`
     );
-
-    res.json({
-      ok: true,
-      comments: rows.map((r) => ({
-        id: r.id,
-        body: r.body,
-        likes: Number(r.likes),
-        dislikes: Number(r.dislikes),
-        timestamp: r.created_at,
-        author: "Anonymous",
-      })),
-    });
+    res.json({ ok: true, comments: rows });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
   }
 });
 
-
 /**
  * POST /comments
- * Body: { name, password, body }
- * Requires a valid logged-in player; stores canonical author but never returns it to clients.
+ * { name, password, body }
+ * Stores with author='Anonymous'
  */
 app.post("/comments", async (req, res) => {
-  const { name, password, body } = req.body || {};
   try {
+    const { name, password, body } = req.body || {};
     if (!(await checkCreds(name, password))) {
       return res.status(401).json({ ok: false, error: "invalid_credentials" });
     }
-    const author = await canonicalName(name);
     const trimmed = (body || "").toString().trim();
     if (!trimmed) {
       return res.status(400).json({ ok: false, error: "empty_body" });
     }
     const { rows } = await pool.query(
-      `INSERT INTO comments (author, body) VALUES ($1, $2)
-       RETURNING id, body, likes, dislikes, created_at`,
-      [author, trimmed]
+      `INSERT INTO comments (author, body) VALUES ('Anonymous', $1)
+       RETURNING id, author, body, likes, dislikes, created_at`,
+      [trimmed]
     );
-    const r = rows[0];
-    res.json({
-      ok: true,
-      comment: {
-        id: r.id,
-        body: r.body,
-        likes: Number(r.likes),
-        dislikes: Number(r.dislikes),
-        timestamp: r.created_at,
-        author: "Anonymous",
-      },
-    });
+    res.json({ ok: true, comment: rows[0] });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
@@ -644,70 +588,91 @@ app.post("/comments", async (req, res) => {
 });
 
 /**
- * PATCH /comments/:id/react
- * Body: { action: 'like' | 'dislike' }
- * Increments counters (no per-user dedupe by design; simple counters).
+ * POST /comments/vote
+ * { name, password, comment_id, type: 'like'|'dislike' }
+ * Upsert vote and adjust counters atomically.
  */
-// PATCH /comments/:id/react
-// Body: { name, password, action: 'like' | 'dislike' }
-app.patch("/comments/:id/react", async (req, res) => {
-  const { id } = req.params;
-  const { name, password, action } = req.body || {};
-
+app.post("/comments/vote", async (req, res) => {
+  const client = await pool.connect();
   try {
+    const { name, password, comment_id, type } = req.body || {};
     if (!(await checkCreds(name, password))) {
       return res.status(401).json({ ok: false, error: "invalid_credentials" });
     }
-    if (action !== "like" && action !== "dislike") {
-      return res.status(400).json({ ok: false, error: "invalid_action" });
+    const voter = await canonicalName(name);
+    const voteType = String(type || "").toLowerCase();
+    if (!["like", "dislike"].includes(voteType)) {
+      return res.status(400).json({ ok: false, error: "invalid_vote_type" });
     }
 
-    const author = await canonicalName(name);
+    await client.query("BEGIN");
 
-    // Upsert reaction (one row per user per comment)
-    await pool.query(
-      `INSERT INTO comment_reactions (comment_id, username, action)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (comment_id, username)
-       DO UPDATE SET action = EXCLUDED.action`,
-      [id, author, action]
+    // Ensure comment exists
+    const { rows: existsRows } = await client.query(
+      `SELECT id FROM comments WHERE id = $1 LIMIT 1`,
+      [comment_id]
     );
-
-    // Return updated comment with fresh counts
-    const { rows } = await pool.query(
-      `SELECT
-         c.id,
-         c.body,
-         c.created_at,
-         COALESCE(SUM(CASE WHEN cr.action='like' THEN 1 ELSE 0 END), 0) AS likes,
-         COALESCE(SUM(CASE WHEN cr.action='dislike' THEN 1 ELSE 0 END), 0) AS dislikes
-       FROM comments c
-       LEFT JOIN comment_reactions cr ON cr.comment_id = c.id
-       WHERE c.id = $1
-       GROUP BY c.id`,
-      [id]
-    );
-    if (rows.length === 0) {
-      return res.status(404).json({ ok: false, error: "not_found" });
+    if (existsRows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ ok: false, error: "comment_not_found" });
     }
-    const r = rows[0];
-    res.json({
-      ok: true,
-      comment: {
-        id: r.id,
-        body: r.body,
-        likes: Number(r.likes),
-        dislikes: Number(r.dislikes),
-        timestamp: r.created_at,
-        author: "Anonymous",
-      },
-    });
+
+    // See if voter already voted
+    const { rows: priorRows } = await client.query(
+      `SELECT id, vote_type FROM comment_voters WHERE voter = $1 AND comment_id = $2`,
+      [voter, comment_id]
+    );
+
+    if (priorRows.length === 0) {
+      // Insert new vote
+      await client.query(
+        `INSERT INTO comment_voters (voter, vote_type, comment_id) VALUES ($1, $2, $3)`,
+        [voter, voteType, comment_id]
+      );
+      if (voteType === "like") {
+        await client.query(`UPDATE comments SET likes = likes + 1 WHERE id = $1`, [comment_id]);
+      } else {
+        await client.query(`UPDATE comments SET dislikes = dislikes + 1 WHERE id = $1`, [comment_id]);
+      }
+    } else {
+      const prev = priorRows[0].vote_type;
+      if (prev === voteType) {
+        // same vote -> no-op
+      } else {
+        // switch vote
+        await client.query(
+          `UPDATE comment_voters SET vote_type = $1 WHERE id = $2`,
+          [voteType, priorRows[0].id]
+        );
+        if (voteType === "like") {
+          await client.query(
+            `UPDATE comments SET likes = likes + 1, dislikes = GREATEST(dislikes - 1, 0) WHERE id = $1`,
+            [comment_id]
+          );
+        } else {
+          await client.query(
+            `UPDATE comments SET dislikes = dislikes + 1, likes = GREATEST(likes - 1, 0) WHERE id = $1`,
+            [comment_id]
+          );
+        }
+      }
+    }
+
+    await client.query("COMMIT");
+
+    const { rows: commentRows } = await pool.query(
+      `SELECT id, author, body, likes, dislikes, created_at FROM comments WHERE id = $1`,
+      [comment_id]
+    );
+    res.json({ ok: true, comment: commentRows[0] });
   } catch (e) {
+    await client.query("ROLLBACK");
     console.error(e);
     res.status(500).json({ ok: false, error: "db_error" });
+  } finally {
+    client.release();
   }
 });
-
 
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
