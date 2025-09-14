@@ -277,7 +277,6 @@ app.delete("/admin/players", async (req, res) => {
 });
 
 // ADMIN: include/exclude one player (toggle can_rate for a single name)
-// ---- shared handler (so we can mount on POST and PATCH) ----
 async function togglePlayerPermission(req, res) {
   try {
     const { adminName, adminPassword, name } = req.body || {};
@@ -321,7 +320,6 @@ async function togglePlayerPermission(req, res) {
     res.status(500).json({ ok: false, error: "db_error" });
   }
 }
-// Support BOTH PATCH and POST (client can use either)
 app.patch("/admin/players/permission", togglePlayerPermission);
 app.post("/admin/players/permission", togglePlayerPermission);
 
@@ -352,6 +350,7 @@ app.post("/admin/lock", async (req, res) => {
 });
 
 // Submit ratings (must have can_rate and match must be unlocked)
+// ALSO: ratees must be players who can_rate (eligible targets only)
 app.post("/submit", async (req, res) => {
   const { name, password, entries } = req.body || {};
   try {
@@ -384,13 +383,17 @@ app.post("/submit", async (req, res) => {
       return res.status(400).json({ ok: false, error: "entries_required" });
     }
 
-    const players = await getAllPlayers();
-    const setPlayers = new Set(players);
+    // Only allow rating eligible players
+    const eligiblePlayers = await getEligibleRaters();
+    const setEligible = new Set(eligiblePlayers);
     const ts = now();
 
     for (const e of entries) {
       const score = Number(e.score);
-      if (!setPlayers.has(e.ratee) || e.ratee.toLowerCase() === raterName.toLowerCase()) {
+      if (
+        !setEligible.has(e.ratee) || // must be eligible
+        e.ratee.toLowerCase() === raterName.toLowerCase() // cannot rate self
+      ) {
         return res.status(400).json({ ok: false, error: "invalid_ratee" });
       }
       if (!Number.isFinite(score) || score < 1 || score > 10) {

@@ -131,7 +131,6 @@ async function fetchMine(name: string): Promise<RatingEntry[]> {
 }
 
 // login (server authoritative, case-insensitive username on server)
-// NOTE: returns canonical-cased name from server so "bader" becomes "Bader".
 async function login(name: string, password: string) {
   return apiSend<{ ok: boolean; name: string }>("/login", { name, password });
 }
@@ -378,6 +377,13 @@ export default function App() {
 
   const hasSubmitted = myRatings.length > 0;
 
+  // Eligible targets for the current user (only players who can_rate, excluding self)
+  const eligibleTargets = playersDetails
+    .filter((p) => p.can_rate)
+    .map((p) => p.name)
+    .filter((name) => name.toLowerCase() !== (currentUser ?? "").toLowerCase());
+  const eligibleTargetsLen = eligibleTargets.length;
+
   // Compute current user's include/exclude status
   const currentDetail = playersDetails.find(
     (p) => p.name.toLowerCase() === (currentUser ?? "").toLowerCase()
@@ -393,7 +399,6 @@ export default function App() {
     } else if (activeTab === "admin" && currentUser === "Bader") {
       refreshPlayers().catch(() => {});
     } else if (activeTab === "rate") {
-      // keep the rate tab aware of permission/lock status
       Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
     }
   }, [activeTab, currentUser]);
@@ -434,7 +439,14 @@ export default function App() {
       return;
     }
 
-    const order = players.filter((p) => p !== currentUser);
+    // Only include eligible targets
+    const order = [...eligibleTargets];
+
+    if (order.length === 0) {
+      toast.error("No eligible players to rate right now.");
+      return;
+    }
+
     const seed = new Date().toISOString().slice(0, 10).replaceAll("-", "");
     const rng = mulberry32(hashStr(seed + currentUser));
     for (let i = order.length - 1; i > 0; i--) {
@@ -472,6 +484,8 @@ export default function App() {
           toast.error("You are excluded from this round and cannot submit.");
         } else if (String(e.message).includes("ratings_locked")) {
           toast.error("Ratings are locked. Please wait for the admin to unlock.");
+        } else if (String(e.message).includes("invalid_ratee")) {
+          toast.error("One or more selections were ineligible to be rated.");
         } else {
           toast.error("Failed to submit ratings.");
         }
@@ -606,8 +620,8 @@ export default function App() {
                 return;
               }
               try {
-                const resp = await login(name, pass); // server validates (case-insensitive username)
-                // Store & use canonical name returned by server
+                const resp = await login(name, pass);
+                // store the canonical name so "bader" becomes "Bader"
                 localStorage.setItem(LS_USER_KEY, resp.name);
                 localStorage.setItem(LS_PASS_KEY, pass);
                 setCurrentUser(resp.name);
@@ -645,7 +659,7 @@ export default function App() {
                 onSubmitOne={submitOne}
                 pendingOrder={pendingOrder}
                 onStart={startRatingFlow}
-                hasFinished={sessionRatings.length === players.length - 1}
+                hasFinished={sessionRatings.length === eligibleTargetsLen}
                 hasSubmitted={myRatings.length > 0}
                 checking={myLoading}
                 canRate={currentUserCanRate}
@@ -1014,7 +1028,7 @@ function RateFlow({
             ) : (
               <>
                 <p className="text-center text-sm text-muted-foreground max-w-prose">
-                  You'll be shown each teammate (except yourself) one by one.
+                  You'll be shown each eligible teammate (except yourself) one by one.
                   Slide to rate from 1 (lowest) to 10 (highest). You can only
                   submit once per round.
                 </p>
@@ -1113,7 +1127,7 @@ function RateFlow({
   );
 }
 
-/* -------------------- Leaderboard (flashy) -------------------- */
+/* -------------------- Leaderboard -------------------- */
 function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   const container: Variants = {
     hidden: {},
@@ -1158,7 +1172,6 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 whileHover={{ y: -2, scale: 1.01 }}
                 className="relative overflow-hidden grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 p-3 rounded-2xl bg-card/60 border"
               >
-                {/* subtle shine sweep */}
                 <motion.div
                   aria-hidden
                   initial={{ x: "-120%" }}
@@ -1166,8 +1179,6 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                   transition={{ duration: 1.2, delay: 0.08 * idx + 0.25, ease: "easeOut" }}
                   className="pointer-events-none absolute inset-y-0 -left-1 w-1/3 rotate-6 bg-gradient-to-r from-transparent via-white/6 to-transparent"
                 />
-
-                {/* rank bubble with pulse for top 3 */}
                 <motion.div
                   variants={idx < 3 ? topPulse : undefined}
                   className={`w-8 text-center font-semibold ${
@@ -1176,20 +1187,16 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
                 >
                   {idx + 1}
                 </motion.div>
-
                 <div className="flex items-center gap-3">
                   <Avatar name={r.player} size={40} />
                   <div className="font-medium">{r.player}</div>
                 </div>
-
                 <div className="text-sm text-muted-foreground">{r.ratings} ratings</div>
-
                 <div className="text-lg font-semibold tabular-nums">
                   {r.average ? r.average.toFixed(2) : "–"}
                 </div>
               </motion.div>
             ))}
-
             <div className="text-xs text-muted-foreground mt-2">
               Averages are calculated across all submitted ratings.
             </div>
@@ -1200,7 +1207,7 @@ function Leaderboard({ rows }: { rows: LeaderboardRow[] }) {
   );
 }
 
-/* -------------------- Admin Panel (cleaned & clearer) -------------------- */
+/* -------------------- Admin Panel -------------------- */
 function AdminPanel({
   players,
   playerDetails,
@@ -1234,7 +1241,6 @@ function AdminPanel({
   const [newPass, setNewPass] = useState("");
   const [removeName, setRemoveName] = useState("");
 
-  // quick lookup for can_rate
   const canRateMap = new Map(
     playerDetails.map((p) => [p.name.toLowerCase(), p.can_rate])
   );
@@ -1280,7 +1286,7 @@ function AdminPanel({
             eligible players submitted.
           </div>
 
-          {/* Players & participation chips */}
+          {/* Players & participation chips — ONLY verb + colored bubble */}
           <div className="space-y-2">
             <div className="font-semibold">Players & Participation</div>
             <div className="flex flex-wrap gap-3">
