@@ -595,19 +595,20 @@ app.post("/comments", async (req, res) => {
 app.post("/comments/vote", async (req, res) => {
   const client = await pool.connect();
   try {
-    const { name, password, comment_id, type } = req.body || {};
+    const { name, password, comment_id } = req.body || {};
+    let { type } = req.body || {}; // 'like' | 'dislike' | 'clear'
     if (!(await checkCreds(name, password))) {
       return res.status(401).json({ ok: false, error: "invalid_credentials" });
     }
     const voter = await canonicalName(name);
-    const voteType = String(type || "").toLowerCase();
-    if (!["like", "dislike"].includes(voteType)) {
+    type = String(type || "").toLowerCase();
+    if (!["like", "dislike", "clear"].includes(type)) {
       return res.status(400).json({ ok: false, error: "invalid_vote_type" });
     }
 
     await client.query("BEGIN");
 
-    // Ensure comment exists
+    // ensure comment exists
     const { rows: existsRows } = await client.query(
       `SELECT id FROM comments WHERE id = $1 LIMIT 1`,
       [comment_id]
@@ -617,44 +618,65 @@ app.post("/comments/vote", async (req, res) => {
       return res.status(404).json({ ok: false, error: "comment_not_found" });
     }
 
-    // See if voter already voted
+    // prior vote?
     const { rows: priorRows } = await client.query(
       `SELECT id, vote_type FROM comment_voters WHERE voter = $1 AND comment_id = $2`,
       [voter, comment_id]
     );
+    const hadVote = priorRows.length > 0;
+    const prev = hadVote ? priorRows[0].vote_type : null;
 
-    if (priorRows.length === 0) {
-      // Insert new vote
+    // If user sends same reaction again, treat as 'clear'
+    if (hadVote && (type === prev)) type = "clear";
+
+    if (!hadVote && type === "clear") {
+      // nothing to remove
+    } else if (!hadVote && (type === "like" || type === "dislike")) {
       await client.query(
         `INSERT INTO comment_voters (voter, vote_type, comment_id) VALUES ($1, $2, $3)`,
-        [voter, voteType, comment_id]
+        [voter, type, comment_id]
       );
-      if (voteType === "like") {
+      if (type === "like") {
         await client.query(`UPDATE comments SET likes = likes + 1 WHERE id = $1`, [comment_id]);
       } else {
         await client.query(`UPDATE comments SET dislikes = dislikes + 1 WHERE id = $1`, [comment_id]);
       }
-    } else {
-      const prev = priorRows[0].vote_type;
-      if (prev === voteType) {
-        // same vote -> no-op
-      } else {
-        // switch vote
+    } else if (hadVote && type === "clear") {
+      // remove existing vote & decrement its counter
+      await client.query(`DELETE FROM comment_voters WHERE id = $1`, [priorRows[0].id]);
+      if (prev === "like") {
         await client.query(
-          `UPDATE comment_voters SET vote_type = $1 WHERE id = $2`,
-          [voteType, priorRows[0].id]
+          `UPDATE comments SET likes = GREATEST(likes - 1, 0) WHERE id = $1`,
+          [comment_id]
         );
-        if (voteType === "like") {
-          await client.query(
-            `UPDATE comments SET likes = likes + 1, dislikes = GREATEST(dislikes - 1, 0) WHERE id = $1`,
-            [comment_id]
-          );
-        } else {
-          await client.query(
-            `UPDATE comments SET dislikes = dislikes + 1, likes = GREATEST(likes - 1, 0) WHERE id = $1`,
-            [comment_id]
-          );
-        }
+      } else if (prev === "dislike") {
+        await client.query(
+          `UPDATE comments SET dislikes = GREATEST(dislikes - 1, 0) WHERE id = $1`,
+          [comment_id]
+        );
+      }
+    } else if (hadVote && (type === "like" || type === "dislike")) {
+      // switch vote
+      await client.query(
+        `UPDATE comment_voters SET vote_type = $1 WHERE id = $2`,
+        [type, priorRows[0].id]
+      );
+      if (type === "like") {
+        await client.query(
+          `UPDATE comments
+             SET likes = likes + 1,
+                 dislikes = GREATEST(dislikes - 1, 0)
+           WHERE id = $1`,
+          [comment_id]
+        );
+      } else {
+        await client.query(
+          `UPDATE comments
+             SET dislikes = dislikes + 1,
+                 likes = GREATEST(likes - 1, 0)
+           WHERE id = $1`,
+          [comment_id]
+        );
       }
     }
 
@@ -671,6 +693,24 @@ app.post("/comments/vote", async (req, res) => {
     res.status(500).json({ ok: false, error: "db_error" });
   } finally {
     client.release();
+  }
+});
+
+app.post("/comments/votes", async (req, res) => {
+  try {
+    const { name, password } = req.body || {};
+    if (!(await checkCreds(name, password))) {
+      return res.status(401).json({ ok: false, error: "invalid_credentials" });
+    }
+    const voter = await canonicalName(name);
+    const { rows } = await pool.query(
+      `SELECT comment_id, vote_type FROM comment_voters WHERE voter = $1`,
+      [voter]
+    );
+    res.json({ ok: true, votes: rows }); // [{comment_id, vote_type}]
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "db_error" });
   }
 });
 

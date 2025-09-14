@@ -246,7 +246,7 @@ async function voteComment(
   name: string,
   password: string,
   comment_id: number,
-  type: "like" | "dislike"
+  type: "like" | "dislike" | "clear"
 ) {
   return apiSend<{ ok: boolean; comment: CommentItem }>(`/comments/vote`, {
     name,
@@ -254,6 +254,19 @@ async function voteComment(
     comment_id,
     type,
   });
+}
+
+async function fetchMyCommentVotes(
+  name: string,
+  password: string
+): Promise<Record<number, "like" | "dislike">> {
+  const data = await apiSend<{
+    ok: boolean;
+    votes: { comment_id: number; vote_type: "like" | "dislike" }[];
+  }>(`/comments/votes`, { name, password });
+  const map: Record<number, "like" | "dislike"> = {};
+  for (const v of data.votes) map[v.comment_id] = v.vote_type;
+  return map;
 }
 
 /* -------------------- Small utils -------------------- */
@@ -351,6 +364,7 @@ export default function App() {
   const [commentSort, setCommentSort] = useState<CommentSort>("latest");
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [newComment, setNewComment] = useState("");
+  const [myVotes, setMyVotes] = useState<Record<number, "like" | "dislike">>({});
 
   // helper: refresh leaderboard (with loading flag)
   async function refreshLeaderboard() {
@@ -467,10 +481,22 @@ export default function App() {
       if (activeTab === "rate") {
         Promise.all([refreshPlayers(), refreshLeaderboard()]).catch(() => {});
       }
+      if (activeTab === "comments") {
+        (async () => {
+          try {
+            const list = await fetchComments(commentSort);
+            setComments(list);
+            if (currentUser && currentPass) {
+              const votes = await fetchMyCommentVotes(currentUser, currentPass);
+              setMyVotes(votes);
+            }
+          } catch {}
+        })();
+      }
     }
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [activeTab, currentUser]);
+  }, [activeTab, currentUser, currentPass, commentSort]);
 
   /* ==== COMMENTS: fetch on tab/sort change ==== */
   useEffect(() => {
@@ -478,15 +504,39 @@ export default function App() {
     (async () => {
       try {
         setCommentsLoading(true);
-        const list = await fetchComments(commentSort);
+        const [list, votes] = await Promise.all([
+          fetchComments(commentSort),
+          currentUser && currentPass
+            ? fetchMyCommentVotes(currentUser, currentPass)
+            : Promise.resolve({}),
+        ]);
         setComments(list);
+        setMyVotes(votes as Record<number, "like" | "dislike">);
       } catch {
         toast.error("Failed to load comments.");
       } finally {
         setCommentsLoading(false);
       }
     })();
-  }, [activeTab, commentSort]);
+  }, [activeTab, commentSort, currentUser, currentPass]);
+
+  /* ==== COMMENTS: lightweight polling while open ==== */
+  useEffect(() => {
+    if (activeTab !== "comments") return;
+    const id = setInterval(async () => {
+      try {
+        const list = await fetchComments(commentSort);
+        setComments(list);
+        if (currentUser && currentPass) {
+          const votes = await fetchMyCommentVotes(currentUser, currentPass);
+          setMyVotes(votes);
+        }
+      } catch {
+        // ignore transient polling errors
+      }
+    }, 5000);
+    return () => clearInterval(id);
+  }, [activeTab, commentSort, currentUser, currentPass]);
 
   /* ---------- Flow helpers ---------- */
   function startRatingFlow() {
@@ -565,6 +615,8 @@ export default function App() {
     setCurrentIndex(0);
     setSessionRatings([]);
     setMyRatings([]);
+    setMyVotes({});
+    setComments([]);
     setMyLoading(false);
     setActiveTab("rate");
   }
@@ -850,6 +902,7 @@ export default function App() {
                 currentUser={currentUser}
                 currentPass={currentPass}
                 comments={comments}
+                myVotes={myVotes}
                 loading={commentsLoading}
                 sort={commentSort}
                 onSortChange={setCommentSort}
@@ -868,12 +921,17 @@ export default function App() {
                   try {
                     await postComment(currentUser, currentPass, body);
                     setNewComment("");
-                    const list = await fetchComments(commentSort);
+                    const [list, votes] = await Promise.all([
+                      fetchComments(commentSort),
+                      fetchMyCommentVotes(currentUser, currentPass),
+                    ]);
                     setComments(list);
+                    setMyVotes(votes);
                     toast.success("Posted anonymously.");
                   } catch (e: any) {
                     const msg = e?.message || "";
-                    if (msg.includes("invalid_credentials")) toast.error("Session expired. Log in again.");
+                    if (msg.includes("invalid_credentials"))
+                      toast.error("Session expired. Log in again.");
                     else toast.error("Failed to post.");
                   }
                 }}
@@ -882,13 +940,30 @@ export default function App() {
                     toast.error("Please log in to vote.");
                     return;
                   }
+                  const current = myVotes[id]; // 'like' | 'dislike' | undefined
+                  const nextType = current === type ? "clear" : type; // toggle
                   try {
-                    const { comment } = await voteComment(currentUser, currentPass, id, type);
-                    setComments((prev) => prev.map((c) => (c.id === id ? comment : c)));
+                    const { comment } = await voteComment(
+                      currentUser,
+                      currentPass,
+                      id,
+                      nextType
+                    );
+                    setComments((prev) =>
+                      prev.map((c) => (c.id === id ? comment : c))
+                    );
+                    setMyVotes((prev) => {
+                      const copy = { ...prev };
+                      if (nextType === "clear") delete copy[id];
+                      else copy[id] = nextType as "like" | "dislike";
+                      return copy;
+                    });
                   } catch (e: any) {
                     const msg = e?.message || "";
-                    if (msg.includes("invalid_credentials")) toast.error("Session expired. Log in again.");
-                    else if (msg.includes("comment_not_found")) toast.error("Comment not found.");
+                    if (msg.includes("invalid_credentials"))
+                      toast.error("Session expired. Log in again.");
+                    else if (msg.includes("comment_not_found"))
+                      toast.error("Comment not found.");
                     else toast.error("Failed to vote.");
                   }
                 }}
@@ -1327,6 +1402,7 @@ function CommentsPanel({
   currentUser,
   currentPass,
   comments,
+  myVotes,
   loading,
   sort,
   onSortChange,
@@ -1338,6 +1414,7 @@ function CommentsPanel({
   currentUser: string | null;
   currentPass: string | null;
   comments: CommentItem[];
+  myVotes: Record<number, "like" | "dislike">;
   loading: boolean;
   sort: CommentSort;
   onSortChange: (s: CommentSort) => void;
@@ -1398,35 +1475,39 @@ function CommentsPanel({
           <div className="text-sm text-muted-foreground">No comments yet.</div>
         ) : (
           <ul className="grid gap-3">
-            {comments.map((c) => (
-              <li
-                key={c.id}
-                className="p-3 rounded-2xl border bg-card/60"
-              >
-                <div className="text-xs text-muted-foreground mb-1">
-                  {new Date(c.created_at).toLocaleString()}
-                </div>
-                <div className="whitespace-pre-wrap">{c.body}</div>
-                <div className="flex items-center gap-3 mt-2 text-sm">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onVote(c.id, "like")}
-                    title="Like"
-                  >
-                    👍 {c.likes}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onVote(c.id, "dislike")}
-                    title="Dislike"
-                  >
-                    👎 {c.dislikes}
-                  </Button>
-                </div>
-              </li>
-            ))}
+            {comments.map((c) => {
+              const mine = myVotes[c.id]; // 'like' | 'dislike' | undefined
+              const liked = mine === "like";
+              const disliked = mine === "dislike";
+              return (
+                <li key={c.id} className="p-3 rounded-2xl border bg-card/60">
+                  <div className="text-xs text-muted-foreground mb-1">
+                    {new Date(c.created_at).toLocaleString()}
+                  </div>
+                  <div className="whitespace-pre-wrap">{c.body}</div>
+                  <div className="flex items-center gap-3 mt-2 text-sm">
+                    <Button
+                      variant={liked ? "default" : "outline"}
+                      size="sm"
+                      aria-pressed={liked}
+                      onClick={() => onVote(c.id, "like")}
+                      title={liked ? "Unlike" : "Like"}
+                    >
+                      👍 {c.likes}
+                    </Button>
+                    <Button
+                      variant={disliked ? "default" : "outline"}
+                      size="sm"
+                      aria-pressed={disliked}
+                      onClick={() => onVote(c.id, "dislike")}
+                      title={disliked ? "Undislike" : "Dislike"}
+                    >
+                      👎 {c.dislikes}
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </CardContent>
